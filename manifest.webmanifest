@@ -1,0 +1,19 @@
+{
+  "name": "Barracks PT",
+  "short_name": "Barracks PT",
+  "description": "An 8-week home strength plan for two pairs of dumbbells, a chair and a stair.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F2EEE3",
+  "theme_color": "#F2EEE3",
+  "lang": "en",
+  "categories": ["health", "fitness"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "barracks-pt",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Barracks PT: an 8-week home strength plan as an iPhone web app.",
+  "scripts": {
+    "dev": "node tools/serve.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "shots": "node tools/shots.mjs",
+    "icons": "node tools/icons.mjs"
+  }
+}

@@ -1,0 +1,8 @@
+# GitHub Pages builds this site with Jekyll. Only the app is published: the dev tools (including
+# the demo seed data), tests, screenshots and docs stay in the repo but never reach the live site.
+exclude:
+  - tools
+  - test
+  - shots
+  - README.md
+  - package.json

@@ -1,0 +1,35 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Stencil+One&family=Public+Sans:wght@600&display=swap">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { display: grid; place-items: center; }
+  .icon { width: 100%; height: 100%; background: #3E4829; color: #E6DCBB; display: grid; place-items: center; position: relative; }
+  .icon .in { display: flex; flex-direction: column; align-items: center; }
+  .icon .pt { font: 400 calc(var(--s) * .40px)/0.9 'Saira Stencil One'; letter-spacing: .02em; }
+  .icon .ticks { display: grid; grid-template-columns: repeat(8, 1fr); gap: calc(var(--s) * .018px); width: calc(var(--s) * .56px); margin-top: calc(var(--s) * .08px); }
+  .icon .ticks i { height: calc(var(--s) * .032px); background: currentColor; }
+  .icon .ticks i { opacity: .38; }
+  .icon .ticks i:first-child { opacity: 1; background: #D9672E; }
+  .splash { width: 100%; height: 100%; display: grid; place-items: center; background: #F2EEE3; color: #1D2116; }
+  .splash.dark { background: #1C1F16; color: #ECE6D3; }
+  .splash .in { display: flex; flex-direction: column; align-items: center; transform: translateY(-4%); }
+  .splash .wm { font: 400 30px/1 'Saira Stencil One'; letter-spacing: .08em; padding-left: .08em; }
+  .splash .ticks { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; width: 150px; margin-top: 16px; }
+  .splash .ticks i { height: 5px; background: currentColor; opacity: .25; }
+  .splash .ticks i:first-child { opacity: 1; background: #AE3A0C; }
+  .splash.dark .ticks i:first-child { background: #E37B46; }
+</style></head>
+<body>
+<script>
+  const q = new URLSearchParams(location.search);
+  const kind = q.get('k') || 'icon';
+  if (kind === 'icon') {
+    const size = +q.get('s') || 512, mask = q.get('mask') === '1';
+    document.body.innerHTML = `<div class="icon" style="--s:${mask ? size * 0.78 : size}"><div class="in"><span class="pt">PT</span><span class="ticks">${'<i></i>'.repeat(8)}</span></div></div>`;
+  } else {
+    document.body.innerHTML = `<div class="splash ${q.get('dark') === '1' ? 'dark' : ''}"><div class="in"><span class="wm">BARRACKS PT</span><span class="ticks">${'<i></i>'.repeat(8)}</span></div></div>`;
+  }
+</script>
+</body></html>
