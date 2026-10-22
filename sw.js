@@ -1,6 +1,6 @@
 // Offline: the whole app is cached on install; fonts are cached the first time they load.
 // Bump VERSION whenever any file changes, so phones pick up the new build.
-const VERSION = 'bpt-1';
+const VERSION = 'bpt-4';
 const FONT_CACHE = 'bpt-fonts-1';
 const DEV = ['localhost', '127.0.0.1'].includes(location.hostname);
 const FONT_CSS = 'https://fonts.googleapis.com/css2?family=Big+Shoulders:opsz,wght@10..72,600..900&family=Saira+Stencil+One&family=Public+Sans:ital,wght@0,400..700;1,400&display=swap';
@@ -8,6 +8,7 @@ const APP = [
   './', 'index.html', 'manifest.webmanifest',
   'css/app.css',
   'js/app.js', 'js/nav.js', 'js/views.js', 'js/session.js', 'js/data.js', 'js/plan.js', 'js/store.js', 'js/ui.js', 'js/feedback.js', 'js/calendar.js',
+  'js/howto.js', 'js/moves.js', 'js/drills.js', 'js/rig.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
 ];
 

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rig lab</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders:opsz,wght@10..72,600..900&family=Saira+Stencil+One&family=Public+Sans:ital,wght@0,400..700;1,400&display=swap">
+<link rel="stylesheet" href="../css/app.css">
+<style>
+  body { padding: 16px 20px 40px; }
+  h2 { font: 800 30px/1 var(--f-display); margin-top: 28px; }
+  h3 { font: 600 15px/1.3 var(--f-text); color: var(--ink-2); margin: 14px 0 4px; }
+  .frames { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); gap: 14px 10px; }
+  .frames figure { margin: 0; border-top: 1px solid var(--line); padding-top: 6px; }
+  .frames figcaption { font-size: 13px; line-height: 1.3; color: var(--ink-2); margin-top: 6px; }
+  .frames figcaption b { display: block; font: 400 16px/1 var(--f-stencil); color: var(--ink); margin-bottom: 3px; }
+  .frames svg.rig { display: block; width: 100%; height: calc(var(--h) * .5px); }
+  .rig-strip svg.rig { height: calc(var(--h) * var(--k, .62) * 1px); }
+</style>
+</head>
+<body>
+<main id="lab"></main>
+<script type="module">
+// Dev only: every demo at phone width, its reduced-motion strip, and ?frames=slug:level&n=8 for a
+// frame strip of one loop (for review). Not shipped: tools/ is excluded from the site.
+import { LIBRARY as MOVES, demoOf } from '../js/moves.js';
+import { mountDemo, stripHTML, poseAt, loopLength, frameSVG, bounds, svgOpen, propsSVG } from '../js/rig.js';
+const lab = document.getElementById('lab');
+const q = new URLSearchParams(location.search);
+if (q.get('k')) document.body.style.setProperty('--k', q.get('k'));
+const LEVEL = ['Recruit', 'Regular', 'Ranger'];
+if (q.get('frames')) {
+  const [slug, k = '0'] = q.get('frames').split(':');
+  const d = demoOf(slug, /^\d$/.test(k) ? +k : k), m = d.move, demo = d.demo, seq = d.seq, n = +(q.get('n') || 8);
+  const L = d.level ?? 0;
+  const total = loopLength(seq), vb = bounds(demo, [seq]);
+  lab.style.setProperty('--cols', q.get('cols') || 4);
+  lab.innerHTML = `<h2 style="margin-top:0">${d.name} · ${m.levels ? (d.variant || LEVEL[L]) : 'drill'}</h2><h3>One loop, ${total.toFixed(1)} s, ${n} frames</h3><div class="frames">${
+    Array.from({ length: n }, (_, i) => { const t = (total * i) / n; const s = poseAt(demo, seq, t);
+      return `<figure>${svgOpen(vb, '')}${propsSVG(demo)}${frameSVG(demo, s.pose)}</svg><figcaption><b>${t.toFixed(1)} s</b><span>${s.label}</span></figcaption></figure>`; }).join('')}</div>`;
+} else {
+  const only = q.get('move') ? q.get('move').split(',') : null;
+  for (const [slug, m] of Object.entries(MOVES)) {
+    if (only && !only.includes(slug)) continue;
+    const sec = document.createElement('section');
+    sec.innerHTML = `<h2>${m.name}</h2>`;
+    lab.appendChild(sec);
+    const levels = m.demos.length === 1 ? [0] : q.get('level') ? [+q.get('level')] : [0, 1, 2];
+    for (const L of levels) {
+      if (!q.has('stillonly')) { const h = document.createElement('h3'); h.textContent = `${LEVEL[L]}`; sec.appendChild(h); }
+      if (!q.has('stillonly')) { const fig = document.createElement('figure'); fig.className = 'demo'; sec.appendChild(fig);
+        mountDemo(fig, m.demos[L], { seq: m.tempo[L], strip: m.strip[L], key: slug + L, label: m.alt }); }
+      if (q.has('strip')) { const st = document.createElement('div'); st.innerHTML = stripHTML(m.demos[L], m.strip[L], m.alt); sec.appendChild(st); }
+    }
+  }
+}
+</script>
+</body>
+</html>

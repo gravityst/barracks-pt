@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { weekNumber, mondayOf, dayIndex, slotDate, parseDose, buildSession, streak, nextSession, shuffleDeck, repsForCard,
-  readyToLevelUp, sessionKeyFor, weekTally, addDays } from '../js/plan.js';
-import { DEFAULTS } from '../js/store.js';
-import { SESSIONS, FINISHERS } from '../js/data.js';
+  readyToLevelUp, sessionKeyFor, weekTally, addDays, WEEKS } from '../js/plan.js';
+import { DEFAULTS, migrate } from '../js/store.js';
+import { SESSIONS, CATALOG, SCHEDULES } from '../js/data.js';
 
 const S = (o = {}) => ({ ...DEFAULTS, setup: true, start: '2026-09-28', ...o, hide: { ...DEFAULTS.hide, ...(o.hide || {}) } });
 
@@ -33,46 +33,106 @@ test('doses parse into ranges, units, sides and dumbbells', () => {
 });
 
 test('every dose in the program parses to something usable', () => {
-  const all = [...Object.values(SESSIONS).flatMap((s) => s.moves || []), ...Object.values(FINISHERS).flatMap((f) => f.moves)];
-  for (const m of all) for (const d of m.d) {
+  for (const [id, m] of Object.entries(CATALOG)) for (const d of m.d) {
     const p = parseDose(d);
-    assert.ok(p.amrap || (p.lo > 0 && p.hi >= p.lo), `${m.id} ${d}`);
+    assert.ok(p.amrap || (p.lo > 0 && p.hi >= p.lo), `${id} ${d}`);
   }
 });
 
-test('phases set the sets: 2, 3, then 4 on the first two moves in Push, 2 in Test', () => {
-  const b = (w) => buildSession(S({ focus: 'balanced' }), w, 0).moves.map((m) => m.sets);
-  assert.deepEqual(b(1), [2, 2, 2, 2, 2, 2]);
-  assert.deepEqual(b(4), [3, 3, 3, 3, 3, 3]);
-  assert.deepEqual(b(6), [4, 4, 3, 3, 3, 3]);
-  assert.deepEqual(b(8), [2, 2, 2, 2, 2, 2]);
-  const c = buildSession(S({ focus: 'balanced' }), 7, 5); // Charlie
-  assert.deepEqual(c.moves.map((m) => m.sets), [4, 4, 3, 3, 3, 3, 3]);
+const strengthDays = ['A', 'B', 'C'].map((k) => SCHEDULES['5-day'].days.indexOf(k));
+const shape = (p) => p.blocks.map((b) => `${b.moves.map((m) => m.id).join('+')}×${b.rounds}`);
+
+test('strength days are three supersets, with core to close on arms focus', () => {
+  assert.deepEqual(shape(buildSession(S({ focus: 'arms' }), 3, 0)), ['A1+AF2×3', 'A2+A3×3', 'AF1+AF3×2', 'A6×1']);
+  assert.deepEqual(shape(buildSession(S({ focus: 'arms' }), 3, 3)), ['B1+BF1×3', 'B2+B3×3', 'B4+BF2×2', 'B6×1']);
+  assert.deepEqual(shape(buildSession(S({ focus: 'arms' }), 3, 5)), ['C1+C4×3', 'C2+C5×3', 'CF1+CF2×2', 'C7×1']);
+  assert.deepEqual(shape(buildSession(S({ focus: 'balanced' }), 3, 0)), ['A1+A5×3', 'A2+A3×3', 'A4+A6×2']);
+  // calf raises go in the rests of superset 2, one set a rest
+  const c = buildSession(S({ focus: 'arms' }), 3, 5);
+  assert.equal(c.gap.id, 'C6'); assert.equal(c.gap.block, 1); assert.equal(c.gap.sets, 3);
+  assert.equal(c.moves.length, 8);
 });
 
-test('arms focus adds the finisher with phase sets, never 4', () => {
+test('rounds by phase: Basic 2, Build 3, Push 3 with 4 on superset 1, superset 3 at 2 in Build and Push, Test 2', () => {
+  const r = (w) => buildSession(S({ focus: 'arms' }), w, 0).blocks.map((b) => b.rounds);
+  assert.deepEqual(r(1), [2, 2, 2, 1]);
+  assert.deepEqual(r(4), [3, 3, 2, 1]);
+  assert.deepEqual(r(6), [4, 3, 2, 1]);
+  assert.deepEqual(r(8), [2, 2, 2, 1]);
   const p = buildSession(S({ focus: 'arms' }), 6, 0);
-  assert.equal(p.moves.length, 9);
-  assert.deepEqual(p.moves.slice(6).map((m) => m.sets), [3, 3, 3]);
-  assert.ok(p.moves.slice(6).every((m) => m.finisher && m.rest === 60));
-  assert.equal(buildSession(S({ focus: 'balanced' }), 6, 0).moves.length, 6);
+  assert.ok(p.moves.every((m) => m.sets === p.blocks[m.block].rounds));
+  assert.deepEqual(p.blocks.map((b) => b.rest), [75, 60, 60, 30]);
 });
 
-test('Ranger Bravo in arms mode swaps the base hammer curl for a plain curl', () => {
-  const p = buildSession(S({ focus: 'arms', level: 2 }), 3, 3);
-  const names = p.moves.map((m) => m.name);
-  assert.equal(names.filter((n) => /hammer/i.test(n)).length, 1);
-  assert.ok(names.includes('Curl, 3-sec lower'));
-  const bal = buildSession(S({ focus: 'balanced', level: 2 }), 3, 3);
-  assert.ok(bal.moves.some((m) => m.name === 'Hammer curl, 3-sec lower'));
+test('the two moves of a superset never work the same muscles', () => {
+  for (const s of ['A', 'B', 'C']) for (const f of ['arms', 'balanced']) for (const pair of SESSIONS[s][f].pairs) {
+    const [a, b] = pair.map((id) => CATALOG[id].mg);
+    assert.notEqual(a, b, `${s} ${f}: ${pair.join(' + ')} both ${a}`);
+  }
+});
+
+test('Balanced keeps every move of the original plan across the week', () => {
+  const ids = new Set(['A', 'B', 'C'].flatMap((k) => [...SESSIONS[k].balanced.pairs.flat(), SESSIONS[k].balanced.gap].filter(Boolean)));
+  for (const id of Object.keys(CATALOG).filter((x) => !/F/.test(x))) assert.ok(ids.has(id), `${id} lost in Balanced`);
+});
+
+test('arms focus puts the arm work in the pairs; wrist curls alternate in for Regular and Ranger', () => {
+  const names = (o, w) => buildSession(S({ focus: 'arms', ...o }), w, 3).moves.map((m) => m.name);
+  assert.ok(names({ level: 1 }, 3).includes('Reverse curl'));
+  assert.ok(names({ level: 1 }, 4).includes('Wrist curl'));
+  assert.ok(!names({ level: 0 }, 4).includes('Wrist curl'));
+  assert.ok(names({ level: 2 }, 3).includes('Hammer curl'));
+  assert.equal(buildSession(S({ focus: 'arms', level: 1 }), 3, 0).moves.filter((m) => m.grip).length, 1); // the curl
 });
 
 test('levels pick variations and doses; Recruit Arnold press uses the 7s', () => {
-  const p = buildSession(S({ level: 0 }), 1, 0);
-  assert.equal(p.moves[1].name, 'Incline push-up');
-  assert.equal(p.moves.find((m) => m.id === 'AF1').dose.weight, 7);
-  assert.equal(buildSession(S({ level: 2 }), 1, 0).moves[1].name, 'Feet-on-chair push-up');
-  assert.equal(buildSession(S({ level: 1, moveLevel: { A2: 2 } }), 1, 0).moves[1].name, 'Feet-on-chair push-up');
+  const pushUp = (o) => buildSession(S(o), 1, 0).moves.find((m) => m.id === 'A2').name;
+  assert.equal(pushUp({ level: 0 }), 'Incline push-up');
+  assert.equal(buildSession(S({ level: 0 }), 1, 0).moves.find((m) => m.id === 'AF1').dose.weight, 7);
+  assert.equal(pushUp({ level: 2 }), 'Feet-on-chair push-up');
+  assert.equal(pushUp({ level: 1, moveLevel: { A2: 2 } }), 'Feet-on-chair push-up');
+});
+
+// The promise: no session ever runs past 40 minutes, at any level, phase, focus, schedule or rest choice.
+test('every session is 40 minutes or less', () => {
+  let worst = { min: 0 };
+  for (const schedule of Object.keys(SCHEDULES)) for (const level of [0, 1, 2]) for (const focus of ['arms', 'balanced'])
+    for (const restLong of [60, 75, 90]) for (const restShort of [45, 60]) for (const deck of [false, true])
+      for (let w = 1; w <= WEEKS; w++) for (let d = 0; d < 7; d++) {
+        const p = buildSession(S({ schedule, level, focus, restLong, restShort, hide: { deck } }), w, d);
+        if (p.seconds / 60 > worst.min) worst = { min: p.seconds / 60, at: `${schedule} L${level} ${focus} ${restLong}/${restShort} w${w} ${p.key}` };
+      }
+  assert.ok(worst.min <= 40, `${worst.min.toFixed(1)} min: ${worst.at}`);
+});
+
+test('the default plan averages 20–30 minutes a session over the 8 weeks', () => {
+  const s = S(); // 4 days, Regular, Arms & shoulders
+  assert.deepEqual([s.schedule, s.level, s.focus], ['4-day', 1, 'arms']);
+  const all = [];
+  for (let w = 1; w <= WEEKS; w++) for (let d = 0; d < 7; d++) { const p = buildSession(s, w, d); if (p.kind !== 'off') all.push(p.minutes); }
+  const avg = all.reduce((a, b) => a + b, 0) / all.length;
+  assert.ok(avg >= 20 && avg <= 30, `average ${avg.toFixed(1)}`);
+  // strength days land around 30 in Build and Push, and in the low-to-mid 20s in Basic and Test
+  for (const d of strengthDays.filter((x) => x >= 0)) {
+    for (const w of [3, 4, 5]) assert.ok(buildSession(s, w, d).minutes <= 31, `Build day ${d}: ${buildSession(s, w, d).minutes}`);
+    for (const w of [6, 7]) assert.ok(buildSession(s, w, d).minutes <= 34, `Push day ${d}: ${buildSession(s, w, d).minutes}`);
+    for (const w of [1, 2, 8]) assert.ok(buildSession(s, w, d).minutes <= 26);
+  }
+});
+
+test('estimates: engine, deck, mobility and walk', () => {
+  const m = (o, w, d) => buildSession(S(o), w, d).minutes;
+  assert.equal(m({}, 1, 1), 23); // Echo, Regular: 4 + 16 + 45 s + 2
+  assert.equal(m({}, 1, 2), 15); // mobility: 8 min walk + 7 × 60 s
+  assert.equal(m({ schedule: '3-day' }, 1, 1), 20); // walk
+  const deck = [0, 1, 2].map((level) => m({ schedule: '5-day', level }, 1, 4));
+  assert.ok(deck[0] < deck[1] && deck[1] <= 25 && deck[2] <= 40, deck.join(' '));
+});
+
+test('old rest settings come down to the superset choices', () => {
+  assert.deepEqual([migrate({ restLong: 90, restShort: 60 }, {}).restLong, migrate({ restLong: 90, restShort: 60 }, {}).restShort], [75, 60]);
+  assert.equal(migrate({ restLong: 120, restShort: 90 }, {}).restShort, 60);
+  assert.equal(migrate({ restLong: 90, restShort: 45 }, { program: 2 }).restLong, 90); // a choice made after the change stays
 });
 
 test('schedules map days; hiding the deck makes Foxtrot an Echo day', () => {
@@ -86,8 +146,10 @@ test('engine and deck follow the level', () => {
   assert.equal(buildSession(S({ level: 0 }), 1, 1).engine.odd.name, 'Squat thrusts');
   assert.equal(buildSession(S({ level: 2 }), 1, 1).engine.even.reps, 40);
   assert.equal(shuffleDeck(0).length, 26);
-  assert.equal(shuffleDeck(1).length, 52);
+  assert.equal(shuffleDeck(1).length, 39);
+  assert.equal(shuffleDeck(2).length, 54);
   assert.equal(shuffleDeck(2).filter((c) => c.joker).length, 2);
+  assert.equal(buildSession(S({ schedule: '5-day', level: 1 }), 1, 4).deck.cards, 39);
   assert.deepEqual(repsForCard({ suit: 'C', rank: 'K' }, 0), { reps: 5, move: 'Burpees' });
   assert.deepEqual(repsForCard({ suit: 'H', rank: 'A' }, 1), { reps: 11, move: 'Squats' });
   assert.deepEqual(repsForCard({ joker: true }, 2), { plank: 60 });

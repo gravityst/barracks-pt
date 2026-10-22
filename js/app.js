@@ -10,7 +10,7 @@ import { dateKey } from './plan.js';
 const seedScene = ['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).get('seed');
 if (seedScene) {
   await new Promise((ok) => { const sc = document.createElement('script'); sc.src = 'tools/seed.js'; sc.onload = sc.onerror = ok; document.head.appendChild(sc); });
-  if (window.__bptSeed) { window.__bptSeed(seedScene); store.reload(); }
+  if (window.__bptSeed) { await window.__bptSeed(seedScene); store.reload(); }
   history.replaceState(null, '', location.pathname);
 }
 
@@ -38,6 +38,11 @@ document.addEventListener('change', (e) => {
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.tagName === 'TEXTAREA' && t.dataset.change && A[t.dataset.change]) A[t.dataset.change](t.value, t, e);
+  if (t.dataset.input && A[t.dataset.input]) A[t.dataset.input](t.value, t, e);   // live search
+});
+// A search field filters as you type, so the keyboard's Search key just puts the keyboard away.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.type === 'search') { e.preventDefault(); e.target.blur(); }
 });
 document.addEventListener('submit', (e) => {
   const f = e.target;

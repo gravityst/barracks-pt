@@ -1,6 +1,6 @@
 // Every screen under the tab bar: Today, Plan (+ day preview), Progress (+ session record), More (+ guide, settings).
 import { SESSIONS, SCHEDULES, LEVELS, PHASES, DAY_SHORT, DAY_LONG, WARMUP, COOLDOWN, REST_NOTE, ENGINE, DECK,
-  MOBILITY, WALK, OFF, TEST, RESULTS, GUIDE, SAFETY, KIT, FOCUS, FINISHERS, GRIP_TIP, ARMS_LINE, ARMS_RESULTS, phaseFor } from './data.js';
+  MOBILITY, WALK, OFF, TEST, RESULTS, GUIDE, SAFETY, KIT, FOCUS, CATALOG, GRIP_TIP, ARMS_LINE, ARMS_RESULTS, phaseFor } from './data.js';
 import { WEEKS, dateKey, addDays, dayIndex, mondayOf, weekNumber, slotDate, buildSession, sessionKeyFor, entryForSlot,
   streak, weekTally, nextSession, isRequired, clock, minutesLabel, daysBetween, readyToLevelUp } from './plan.js';
 import * as store from './store.js';
@@ -9,8 +9,10 @@ import { esc, icon, chev, tick, suitSvg, longDate, shortDate, dayMonth, timeLabe
 import { push, pop, refresh, showTab, nav, top, draw } from './nav.js';
 import { startSession, resumeSession, summaryHTML } from './session.js';
 import { downloadCalendar } from './calendar.js';
+import { doLine, openMoveSheet, usedIn } from './howto.js';
+import { LIBRARY } from './moves.js';
 
-export const VERSION = '1.0';
+export const VERSION = '1.1';
 const LETTER = { A: 'A', B: 'B', C: 'C', E1: 'E', E2: 'F', mob: 'M', walk: 'W', off: '·' };
 
 const S = () => store.settings();
@@ -25,20 +27,22 @@ function navbar(title, { back, right = '', always = false } = {}) {
 const largeTitle = (t, sub = '') => `<div class="largetitle" data-titlemark><h1>${esc(t)}</h1>${sub ? `<p>${sub}</p>` : ''}</div>`;
 const secH = (t, aside = '', tag = 'h2') => `<div class="sec-h"><${tag}>${esc(t)}</${tag}>${aside ? `<span class="aside">${aside}</span>` : ''}</div>`;
 
-// A strength day's length includes the arm finisher when it's on.
-function dayTime(s, key) { const ss = SESSIONS[key]; return ss.kind === 'strength' && s.focus === 'arms' ? `${parseInt(ss.time, 10) + FINISHERS[key].minutes} min` : ss.time; }
+// The estimate for a planned day ("~26 min"), from the same model the workout uses.
+const dayMinutes = (s, week, day) => `~${buildSession(s, week, day).minutes} min`;
 function currentWeek() { const s = S(); return s.start ? weekNumber(s.start, dateKey()) : 1; }
 function clampWeek(w) { return Math.min(Math.max(w, 1), WEEKS); }
 
 function sessionMeta(p) {
+  const t = `~${p.minutes} min`;
   if (p.kind === 'strength') {
-    const base = p.moves.filter((m) => !m.finisher).length;
-    return [p.finisher ? `${parseInt(p.time, 10) + p.finisher.minutes} min` : p.time, p.finisher ? `${base} moves + arm finisher` : `${base} moves`, `${p.phase.sets} sets each${p.phase.mainSets ? ', 4 on the first two' : ''}`];
+    const pairs = p.blocks.filter((b) => b.kind === 'pair').length;
+    const core = p.blocks.some((b) => b.kind === 'core');
+    return [t, `${pairs} supersets${core ? ' + core' : ''}`, `${p.phase.rounds} rounds`];
   }
-  if (p.kind === 'engine') return [p.time, `${p.engine.minutes} min every minute on the minute`];
-  if (p.kind === 'deck') return [p.time, `${p.deck.cards} cards`];
-  if (p.kind === 'mobility') return [p.time, '20 min walk + 7 stretches'];
-  if (p.kind === 'walk') return [p.time, 'Optional'];
+  if (p.kind === 'engine') return [t, `${p.engine.minutes}-minute EMOM`];
+  if (p.kind === 'deck') return [t, `${p.deck.cards} cards`];
+  if (p.kind === 'mobility') return [t, `${MOBILITY.walk.minutes} min walk + ${MOBILITY.stretches.length} stretches`];
+  if (p.kind === 'walk') return [t, 'Optional'];
   return [];
 }
 
@@ -50,46 +54,60 @@ function entrySummaryLine(e) {
   return bits.join(' · ');
 }
 
+// A list where every item with a demo opens it (warm-ups, cool-downs, stretches).
+function tapList(items, refs) {
+  return `<ul class="bulleted taps">${items.map((x, i) => (refs[i]
+    ? `<li><button type="button" data-act="lib-sheet" data-ref="${esc(refs[i])}"><span>${esc(x)}</span>${chev}</button></li>`
+    : `<li><span>${esc(x)}</span></li>`)).join('')}</ul>`;
+}
+const suitRef = (su, L) => (su.demo === 'push-up' ? `push-up:${L}` : su.demo);
+
 // ---- the body of a session, used by Today and by the day preview ----
 function sessionBody(p, { full = false } = {}) {
   const s = S();
   if (p.kind === 'strength') {
-    const li = (m, i) => `
-      <li><span class="no">${i + 1}</span><span class="nm">${esc(m.name)}${m.level !== s.level ? ` <span class="lvl">${esc(LEVELS[m.level].name)}</span>` : ''}</span>
-      <span class="ds">${m.sets} × ${esc(m.dose.reps)}</span>
+    // Each superset is a pair, 1a and 1b; every move opens its demo and how-to.
+    const li = (m, no, dose = m.dose.reps) => `
+      <li class="tap"><button type="button" class="mv" data-act="move-sheet" data-id="${esc(m.id)}" data-l="${m.level}" data-name="${esc(m.name)}">
+      <span class="no">${esc(no)}</span><span class="nm">${esc(m.name)}${m.level !== s.level ? ` <span class="lvl">${esc(LEVELS[m.level].name)}</span>` : ''}</span>
+      <span class="ds">${esc(dose)}</span>
       ${m.dose.weight ? `<span class="kt">${esc(kitText(m.dose.weight, s.units))}</span>` : ''}
-      ${full ? `<span class="how">${esc(m.how)}${m.grip ? ` <b>Thick grip:</b> wrap a hand towel around the handle.` : ''}</span>` : ''}</li>`;
-    const moves = p.moves.filter((m) => !m.finisher).map(li).join('');
-    const fin = p.moves.filter((m) => m.finisher);
-    const finBlock = fin.length ? `<div class="section">${secH(`Arm finisher · ${p.finisher.minutes} min`, esc(p.finisher.focus), 'h3')}<ol class="moves">${fin.map((m, j) => li(m, j)).join('')}</ol>
-      ${full && fin.some((m) => m.grip) ? `<p class="fine">${esc(GRIP_TIP)}</p>` : ''}</div>` : '';
+      ${full ? `<span class="how">${esc(doLine(m.id, m.level, m.how))}${m.grip ? ` <b>Thick grip:</b> wrap a hand towel around the handle.` : ''}</span>` : ''}</button></li>`;
+    const sets = p.blocks.map((b, i) => {
+      const rows = b.moves.map((m, j) => li(m, b.kind === 'pair' ? `${b.n}${'ab'[j]}` : '')).join('');
+      const gap = p.gap && p.gap.block === i ? `<ol class="moves gaplist" aria-label="During the rests">${li(p.gap, '', `${p.gap.dose.reps} each rest`)}</ol>` : '';
+      return `<div class="sset${b.kind === 'core' ? ' core' : ''}"><p class="sset-h"><b>${esc(b.label)}</b><span>${b.rounds} round${b.rounds > 1 ? 's' : ''}${b.rounds > 1 || b.kind === 'pair' ? ` · rest ${b.rest} s` : ''}</span></p>
+        <ol class="moves${b.kind === 'pair' ? ' pairlist' : ''}">${rows}</ol>${gap}</div>`;
+    }).join('');
     return `
-      ${full ? `<div class="section">${secH(`Warm-up · ${WARMUP.minutes} min`, '', 'h3')}<ul class="bulleted">${WARMUP.items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
-      <div class="section">${secH(full ? 'Main work' : 'The work', full ? `Leave ${p.phase.rir} in the tank` : `${p.phase.sets} sets each`, 'h3')}<ol class="moves">${moves}</ol>
-      <p class="fine">${full ? esc(REST_NOTE) : `Warm-up ${WARMUP.minutes} min first, cool-down ${COOLDOWN.minutes} min after. ${esc(REST_NOTE)}`}</p></div>
-      ${finBlock}
-      ${full ? `<div class="section">${secH(`Cool-down · ${COOLDOWN.minutes} min`, '', 'h3')}<ul class="bulleted">${COOLDOWN.items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}`;
+      ${full ? `<div class="section">${secH(`Warm-up · ${WARMUP.minutes} min`, '', 'h3')}${tapList(WARMUP.items, WARMUP.demos.map((r, i) => r || (i === WARMUP.items.length - 1 ? `@${p.blocks[0].moves[0].id}:${p.blocks[0].moves[0].level}` : null)))}</div>` : ''}
+      <div class="section">${secH('The work', `Leave ${p.phase.rir} in the tank`, 'h3')}
+      <div class="ssets">${sets}</div>
+      <p class="fine">${esc(REST_NOTE)} Tap a move to see how it’s done.${full ? '' : ` Warm-up ${WARMUP.minutes} min first, cool-down ${COOLDOWN.minutes} min after.`}</p>
+      ${full && p.moves.some((m) => m.grip) ? `<p class="fine">${esc(GRIP_TIP)}</p>` : ''}</div>
+      ${full ? `<div class="section">${secH(`Cool-down · ${COOLDOWN.minutes} min`, '', 'h3')}${tapList(COOLDOWN.items, COOLDOWN.demos)}</div>` : ''}`;
   }
   if (p.kind === 'engine') {
     const e = p.engine;
     return `
-      ${full ? `<div class="section">${secH(`Warm-up · ${ENGINE.warmup.minutes} min`, '', 'h3')}<ul class="bulleted">${ENGINE.warmup.items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+      ${full ? `<div class="section">${secH(`Warm-up · ${ENGINE.warmup.minutes} min`, '', 'h3')}${tapList(ENGINE.warmup.items, ENGINE.warmup.demos)}</div>` : ''}
       <div class="section">${secH(`EMOM · ${e.minutes} min`, 'Every minute on the minute', 'h3')}
-      <ol class="moves">
-        <li><span class="no">1</span><span class="nm">Odd minutes: ${esc(e.odd.name.toLowerCase())}</span><span class="ds">${e.odd.reps} reps</span>${full ? `<span class="how">${esc(e.odd.how)}</span>` : ''}</li>
-        <li><span class="no">2</span><span class="nm">Even minutes: ${esc(e.even.name.toLowerCase())}</span><span class="ds">${e.even.reps} total</span>${full ? `<span class="how">${esc(e.even.how)}</span>` : ''}</li>
-        <li><span class="no">3</span><span class="nm">Finisher: ${esc(e.finisher.name.toLowerCase())}</span><span class="ds">${e.finisher.seconds} s</span>${full ? `<span class="how">${esc(e.finisher.how)}</span>` : ''}</li>
-      </ol><p class="fine">${esc(ENGINE.rule)}</p></div>`;
+      <ol class="moves">${[
+        ['1', `Odd minutes: ${e.odd.name.toLowerCase()}`, `${e.odd.reps} reps`, e.odd.how, e.odd.demo || 'burpee'],
+        ['2', `Even minutes: ${e.even.name.toLowerCase()}`, `${e.even.reps} total`, e.even.how, ENGINE.even.demo],
+        ['3', `Finisher: ${e.finisher.name.toLowerCase()}`, `${e.finisher.seconds} s`, e.finisher.how, ENGINE.finisher.demo],
+      ].map(([no, nm, ds, how, ref]) => `<li class="tap"><button type="button" class="mv" data-act="lib-sheet" data-ref="${esc(ref)}"><span class="no">${no}</span><span class="nm">${esc(nm)}</span><span class="ds">${esc(ds)}</span>${full ? `<span class="how">${esc(how)}</span>` : ''}</button></li>`).join('')}
+      </ol><p class="fine">${esc(ENGINE.rule)} Tap a move to see how it’s done.</p></div>`;
   }
   if (p.kind === 'deck') {
     return `<div class="section">${secH('The drill', `${p.deck.cards} cards`, 'h3')}
-      <ul class="suitlist">${DECK.suits.map((su) => `<li>${suitSvg(su.id, 'suit' + (su.red ? ' red' : ''))}<span>${esc(su.name)}</span><span class="muted">${esc(su.move)}${su.id === 'C' && p.deck.halfBurpees ? ' (half)' : ''}</span></li>`).join('')}
-      ${p.deck.jokers ? `<li><span class="stencil" aria-hidden="true">J</span><span>Jokers</span><span class="muted">1 min plank</span></li>` : ''}</ul>
-      <p class="fine">${esc(DECK.values)} ${esc(p.deck.text)} ${esc(DECK.rule)}</p></div>`;
+      <ul class="suitlist taps">${DECK.suits.map((su) => `<li><button type="button" data-act="lib-sheet" data-ref="${esc(suitRef(su, p.level ?? s.level))}">${suitSvg(su.id, 'suit' + (su.red ? ' red' : ''))}<span>${esc(su.name)}</span><span class="muted">${esc(su.move)}${su.id === 'C' && p.deck.halfBurpees ? ' (half)' : ''}</span>${chev}</button></li>`).join('')}
+      ${p.deck.jokers ? `<li><button type="button" data-act="lib-sheet" data-ref="${esc(DECK.joker)}"><span class="stencil" aria-hidden="true">J</span><span>Jokers</span><span class="muted">1 min plank</span>${chev}</button></li>` : ''}</ul>
+      <p class="fine">${esc(DECK.values)} ${esc(p.deck.text)} ${esc(DECK.rule)} Tap a suit to see its move.</p></div>`;
   }
   if (p.kind === 'mobility') {
     return `<div class="section">${secH('Walk, then stretch', MOBILITY.note, 'h3')}
-      <ul class="bulleted"><li>${esc(MOBILITY.walk.text)}</li>${MOBILITY.stretches.map((x) => `<li>${esc(x.name)}${x.side ? `, ${esc(x.side.toLowerCase())}` : ''} · ${x.seconds} s</li>`).join('')}</ul></div>`;
+      ${tapList([MOBILITY.walk.text, ...MOBILITY.stretches.map((x) => `${x.name}${x.side ? `, ${x.side.toLowerCase()}` : ''} · ${x.seconds} s`)], [null, ...MOBILITY.stretches.map((x) => x.demo)])}</div>`;
   }
   if (p.kind === 'walk') return `<div class="section"><p class="copy">${esc(WALK.text)}</p></div>`;
   return `<div class="section"><p class="copy">${esc(OFF.text)}</p></div>`;
@@ -123,7 +141,7 @@ function heroFor(p, slot, isToday) {
   }
   if (entry) {
     return `<section class="hero done">${trainWhen(false)}<h2 class="${long.trim()}">${esc(p.name)}</h2><p class="title">${esc(p.title)}</p>
-      <div class="stamp">${tick}<span>DONE</span></div>
+      <div class="stamp">${tick}<span>Done</span></div>
       <p class="meta"><span>${esc(entrySummaryLine(entry))}</span></p>
       <div class="btnrow" style="margin-top:18px"><button type="button" class="btn" data-act="open-entry" data-id="${esc(entry.id)}">See the record</button></div></section>`;
   }
@@ -164,7 +182,7 @@ function upcoming(today) {
     if (w < 1 || w > WEEKS) continue;
     const key = sessionKeyFor(s, dayIndex(k)), ss = SESSIONS[key];
     rows.push(`<button type="button" class="row dayrow" data-act="day" data-week="${w}" data-day="${dayIndex(k)}">
-      <span class="t"><span class="d">${esc(DAY_SHORT[dayIndex(k)])}</span><span>${esc(ss.kind === 'off' ? 'Rest' : ss.name)}<span class="s">${esc(ss.kind === 'off' ? 'Rest day' : `${ss.title}${ss.time ? ' · ' + dayTime(s, key) : ''}`)}</span></span></span>
+      <span class="t"><span class="d">${esc(DAY_SHORT[dayIndex(k)])}</span><span>${esc(ss.kind === 'off' ? 'Rest' : ss.name)}<span class="s">${esc(ss.kind === 'off' ? 'Rest day' : `${ss.title} · ${dayMinutes(s, w, dayIndex(k))}`)}</span></span></span>
       <span class="v">${chev}</span></button>`);
   }
   if (!rows.length) return '';
@@ -176,7 +194,7 @@ function welcome() {
   const today = dateKey();
   const thisMon = mondayOf(today), nextMon = addDays(thisMon, 7);
   return `<div class="welcome" style="padding-top:calc(var(--safe-top) + 18px)">
-    <p class="wordmark">BARRACKS PT</p>
+    <p class="wordmark">Barracks PT</p>
     <h1 data-titlemark>Eight weeks.<br>Two pairs of dumbbells.</h1>
     <p class="intro">A home strength plan for getting bigger and stronger with almost no gear. Three strength days do the building; the conditioning days keep it military.</p>
     <ul class="kitlist"><li><b>Kit</b><span>${esc(KIT.weights)}</span></li><li><b>Also</b><span>${esc(KIT.also)}</span></li><li><b>Time</b><span>${esc(KIT.time)}</span></li></ul>
@@ -211,7 +229,7 @@ function todayView() {
     <div class="today-head" data-titlemark><p class="dateline">${esc(longDate(today))}</p>
     <div class="weekline"><span class="wk-num" aria-hidden="true">${pad2(clampWeek(wk))}</span><div><b>${line}</b><span>${esc(subLine(wk))}</span></div></div>
     ${weekbar(wk)}</div>`;
-  function subLine(wk) { const ph = phaseFor(clampWeek(wk)); return `${ph.name} phase · ${ph.sets} sets, ${ph.rir} in the tank`; }
+  function subLine(wk) { const ph = phaseFor(clampWeek(wk)); return `${ph.name} phase · ${ph.rounds} rounds, ${ph.rir} in the tank`; }
 
   if (w < 1) {
     const p = buildSession(s, 1, 0);
@@ -241,6 +259,7 @@ function todayView() {
     ${weighNotice(today)}`;
 }
 
+on('move-sheet', (d) => openMoveSheet({ id: d.id, level: +d.l, name: d.name }));
 on('start', (d) => {
   const s = S();
   startSession(buildSession(s, +d.week, +d.day), d.slot);
@@ -311,7 +330,7 @@ function planView(params) {
     const isT = slot === today;
     const tag = done ? `<span class="tag ok">${tick} Done</span>` : isT ? '<span class="tag now">Today</span>' : (slot < today && isRequired(key)) ? '<span class="tag">Missed</span>' : ss.optional ? '<span class="tag">Optional</span>' : ss.easy ? '<span class="tag">Easy day</span>' : '';
     return `<button type="button" class="row dayrow${isT ? ' is-today' : ''}" data-act="day" data-week="${sel}" data-day="${d}">
-      <span class="t"><span class="d">${dn}</span><span>${esc(ss.kind === 'off' ? 'Rest' : ss.name)}<span class="s">${esc(ss.kind === 'off' ? 'Rest day' : `${ss.title}${ss.time ? ' · ' + dayTime(s, key) : ''}`)}</span></span></span>
+      <span class="t"><span class="d">${dn}</span><span>${esc(ss.kind === 'off' ? 'Rest' : ss.name)}<span class="s">${esc(ss.kind === 'off' ? 'Rest day' : `${ss.title} · ${dayMinutes(s, sel, d)}`)}</span></span></span>
       <span class="v">${tag}${chev}</span></button>`;
   }).join('');
   return `${navbar('Plan')}
@@ -503,7 +522,8 @@ function moreView() {
   return `${navbar('More')}${largeTitle('More')}
     ${install}
     <div class="section" style="margin-top:${install ? 26 : 0}px">${secH('Guide')}<div class="rows" style="border-top:0">
-      ${g('moves', 'How to do each move', s.focus === 'arms' ? 'Every variation, plus the arm finishers' : 'Every variation, by day')}
+      <button type="button" class="row" data-act="go-library"><span><span class="t">Moves A–Z</span><span class="s">All ${Object.keys(LIBRARY).length} moves, each with its demo</span></span><span class="v">${chev}</span></button>
+      ${g('moves', 'How to do each move', 'Every superset, by day')}
       ${g('time', 'Best time to train', `${timeLabel(s.trainAt)}, then lunch`)}
       ${g('sore', 'Not too sore', 'How the first weeks stay easy')}
       ${g('harder', 'Making it harder', 'When to move a level up')}
@@ -520,57 +540,98 @@ function moreView() {
     <p class="fine">Barracks PT ${VERSION}. Everything you log stays on this phone${store.storageOK ? '' : '. <b class="sig">Saving is blocked on this device right now, so nothing will be kept.</b>'}</p></div>`;
 }
 on('guide', (d) => push('guide', { id: d.id }));
+on('go-library', () => push('library'));
 
-const largeTitleInline = (t) => `<h2 style="font:800 34px/1 var(--f-display)">${esc(t)}</h2>`;
+// ================= MOVES A–Z =================
+// Every move in the library, strength and drills alike, grouped by first letter. Search matches the
+// name, every level's name and where it's used; each row opens the same sheet as everywhere else.
+let libQuery = '';
+const fold = (t) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’'‘]/g, '').replace(/[^a-z0-9¼½]+/g, ' ').trim();
+function libraryView() {
+  const list = Object.entries(LIBRARY).map(([slug, m]) => ({ slug, m, used: usedIn(slug) }))
+    .sort((a, b) => a.m.name.localeCompare(b.m.name));
+  const groups = {};
+  for (const e of list) (groups[e.m.name[0].toUpperCase()] ||= []).push(e);
+  const row = ({ slug, m, used }) => {
+    // Name, every level's name, where it's used (without the focus label) and what you feel it in,
+    // so "shoulders", "Bravo" or "biceps" all find something.
+    const find = ' ' + fold([m.name, ...(m.names || []), ...used.map((u) => u.replace(/\s*\(.*?\)/g, '')), m.how.feel].join(' '));
+    const sub = used.join(' · ');
+    return `<button type="button" class="row lib-row" data-act="lib-sheet" data-ref="${esc(slug)}" data-find="${esc(find)}">
+      <span><span class="t">${esc(m.name)}</span><span class="s">${esc(sub)}</span></span><span class="v">${m.levels ? '<span class="lib-k">3 levels</span>' : ''}${chev}</span></button>`;
+  };
+  const body = Object.entries(groups).map(([L, es]) => `<section class="lib-g" data-letter="${L}"><h2 class="lib-l">${L}</h2><div class="rows">${es.map(row).join('')}</div></section>`).join('');
+  return `${navbar('Moves', { back: 'More' })}${largeTitle('Moves A–Z')}
+    <div class="section" style="margin-top:0">
+      <p class="lead" style="margin-top:0">Every move in the plan, from the strength days to the warm-ups and stretches. Tap one for its demo and how-to.</p>
+      <div class="search"><label class="vh" for="lib-q">Search moves</label>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4.5 4.5"/></svg>
+        <input id="lib-q" type="search" placeholder="Search ${list.length} moves" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="${esc(libQuery)}" data-input="lib-find"></div>
+      <div class="lib">${body}</div>
+      <p class="empty" id="lib-none" hidden></p>
+    </div>`;
+}
+function filterLibrary(root) {
+  const q = fold(libQuery);
+  let shown = 0;
+  root.querySelectorAll('.lib-g').forEach((g) => {
+    let n = 0;
+    g.querySelectorAll('.lib-row').forEach((r) => { const hit = !q || q.split(' ').every((w) => r.dataset.find.includes(' ' + w)); r.hidden = !hit; if (hit) n++; });
+    g.hidden = !n; shown += n;
+  });
+  const none = root.querySelector('#lib-none');
+  if (none) { none.hidden = shown > 0; none.textContent = shown ? '' : `No move matches “${libQuery.trim()}”. Try a body part, like “shoulders”, or a day, like “Bravo”.`; }
+}
+on('lib-find', (v, el) => { libQuery = v; filterLibrary(el.closest('.view')); });
+
 function guideView({ id }) {
   const s = S();
   const L = s.level;
   const wrap = (title, inner) => `${navbar(title, { back: 'More' })}${largeTitle(title)}<div class="section" style="margin-top:0">${inner}</div>`;
   if (GUIDE[id]) {
     const g = GUIDE[id];
-    return wrap(g.title, `${g.lead ? `<p class="lead" style="margin-top:0">${esc(g.lead)}</p>` : ''}<ol class="manual" style="border-top:2px solid var(--ink)">${g.lines(timeLabel(s.trainAt)).map((x) => `<li><span>${esc(x)}</span></li>`).join('')}</ol>
+    return wrap(g.title, `${g.lead ? `<p class="lead" style="margin-top:0">${esc(g.lead)}</p>` : ''}<ol class="manual" style="border-top:1px solid var(--line)">${g.lines(timeLabel(s.trainAt)).map((x) => `<li><span>${esc(x)}</span></li>`).join('')}</ol>
       ${id === 'sore' ? `<p class="callout">${esc(SAFETY)}</p>` : ''}`);
   }
   if (id === 'moves') {
+    const plan = (k) => SESSIONS[k][s.focus === 'arms' ? 'arms' : 'balanced'];
+    const one = (id, tag) => {
+      const m = CATALOG[id];
+      const lv = Number.isInteger(s.moveLevel[id]) ? s.moveLevel[id] : L;
+      return `<div class="guide-move"><h3>${tag ? `<span class="s-tag">${esc(tag)}</span>` : ''}${esc(m.n[lv])}</h3><p>${esc(m.h)}</p>
+        <table class="lvltable">${LEVELS.map((l) => `<tr class="${l.id === lv ? 'mine' : ''}"><td>${esc(l.name)}</td><td>${esc(m.n[l.id])}</td><td>${esc(m.d[l.id])}</td></tr>`).join('')}</table></div>`;
+    };
     const day = (k) => {
-      const ss = SESSIONS[k];
-      return `<div class="section" style="padding:0">${secH(`${ss.name} · ${ss.title}`)}${ss.moves.map((m) => {
-        const lv = Number.isInteger(s.moveLevel[m.id]) ? s.moveLevel[m.id] : L;
-        return `<div class="guide-move"><h3>${esc(m.n[lv])}</h3><p>${esc(m.h)}</p>
-        <table class="lvltable">${LEVELS.map((l) => `<tr class="${l.id === lv ? 'mine' : ''}"><td>${esc(l.name)}</td><td>${esc(m.n[l.id])}</td><td>${esc(m.d[l.id])}</td></tr>`).join('')}</table></div>`;
-      }).join('')}</div>`;
+      const ss = SESSIONS[k], pl = plan(k);
+      const pairs = pl.pairs.map((pair, i) => pair.map((id, j) => one(id, `${i + 1}${'ab'[j]}`)).join('')
+        + (pl.gap && i === 1 ? one(pl.gap, 'Rest') : '')).join('');
+      const alt = pl.alt ? Object.entries(pl.alt).map(([from, a]) => `<p class="fine">${esc(LEVELS[a.minLevel].name)} and up: ${esc(CATALOG[a.id].n[1].toLowerCase())}s replace ${esc(CATALOG[from].n[1].toLowerCase())}s in even weeks.</p>`).join('') : '';
+      return `<div class="section" style="padding:0">${secH(`${ss.name} · ${ss.title}`)}${pairs}${pl.core ? one(pl.core, 'Core') : ''}${alt}</div>`;
     };
-    const fin = (k) => {
-      const f = FINISHERS[k], ss = SESSIONS[k];
-      return `<div class="section" style="padding:0">${secH(`${ss.name} finisher · ${f.focus}`)}${f.moves.map((m) => {
-        const lv = Number.isInteger(s.moveLevel[m.id]) ? s.moveLevel[m.id] : L;
-        return `<div class="guide-move"><h3>${esc(m.n[lv])}</h3><p>${esc(m.h)}</p>
-        <table class="lvltable">${LEVELS.map((l) => `<tr class="${l.id === lv ? 'mine' : ''}"><td>${esc(l.name)}</td><td>${esc(m.n[l.id])}</td><td>${esc(m.d[l.id])}</td></tr>`).join('')}</table></div>`;
-      }).join('')}</div>`;
-    };
-    const arms = `<div style="height:34px"></div>${largeTitleInline('Arm finishers')}
-      <p class="lead">${esc(FOCUS.arms.text)} ${s.focus === 'arms' ? 'It’s on.' : 'It’s off: turn it on in Settings under Focus.'}</p>
-      <p class="callout">${esc(ARMS_LINE)}</p><p class="callout">${esc(GRIP_TIP)} Regular and Ranger.</p>
-      <div style="height:20px"></div>${fin('A')}<div style="height:26px"></div>${fin('B')}<div style="height:26px"></div>${fin('C')}`;
-    return wrap('How to do each move', `<p class="lead" style="margin-top:0">Your level is marked. “7s” and “15s” mean which pair of dumbbells to use; “/ leg” means each side.</p>${day('A')}<div style="height:26px"></div>${day('B')}<div style="height:26px"></div>${day('C')}${arms}`);
+    const lead = s.focus === 'arms'
+      ? `${FOCUS.arms.text} ${ARMS_LINE}`
+      : `${FOCUS.balanced.text} Arms & shoulders, in Settings under Focus, puts curls, presses and raises into the pairs instead.`;
+    return wrap('How to do each move', `<p class="lead" style="margin-top:0">Your level is marked. “7s” and “15s” mean which pair of dumbbells to use; “/ leg” means each side. 1a and 1b are the two halves of superset 1.</p>
+      <p class="callout">${esc(lead)}</p>${s.focus === 'arms' ? `<p class="callout">${esc(GRIP_TIP)} Regular and Ranger.</p>` : ''}
+      <div style="height:20px"></div>${day('A')}<div style="height:26px"></div>${day('B')}<div style="height:26px"></div>${day('C')}`);
   }
   if (id === 'results') {
-    return wrap('When to expect results', `<p class="lead" style="margin-top:0">${esc(RESULTS.intro)}</p>${s.focus === 'arms' ? `<p class="callout" style="margin:14px 0 18px">${esc(ARMS_RESULTS)}</p>` : ''}<ol class="timeline" style="border-top:2px solid var(--ink)">${RESULTS.steps.map((x) => `<li class="${x.key ? 'key' : ''}"><span class="w">${esc(x.when)}</span><p>${esc(x.text)}</p></li>`).join('')}</ol>`);
+    return wrap('When to expect results', `<p class="lead" style="margin-top:0">${esc(RESULTS.intro)}</p>${s.focus === 'arms' ? `<p class="callout" style="margin:14px 0 18px">${esc(ARMS_RESULTS)}</p>` : ''}<ol class="timeline" style="border-top:1px solid var(--line)">${RESULTS.steps.map((x) => `<li class="${x.key ? 'key' : ''}"><span class="w">${esc(x.when)}</span><p>${esc(x.text)}</p></li>`).join('')}</ol>`);
   }
   if (id === 'engine') {
     const e = buildSession(s, 1, 1).engine || null;
     const lines = ENGINE.minutes.map((m, i) => `<tr class="${i === L ? 'mine' : ''}"><td>${esc(LEVELS[i].name)}</td><td>${m} min · ${ENGINE.odd[i].reps} ${esc(ENGINE.odd[i].name.toLowerCase())} / ${ENGINE.even.reps[i]} climbers</td><td>${ENGINE.finisher.seconds[i]} s kicks</td></tr>`).join('');
     return wrap('Engine intervals', `<p class="lead" style="margin-top:0">Every minute on the minute. Odd minutes: ${L === 0 ? 'squat thrusts' : 'burpees'}. Even minutes: mountain climbers. Then a flutter-kick finisher.</p>
-      <ol class="manual" style="border-top:2px solid var(--ink)"><li><span>${esc(ENGINE.odd[L].name)}: ${esc(ENGINE.odd[L].how)}</span></li><li><span>Mountain climbers: ${esc(ENGINE.even.how)}</span></li><li><span>Flutter kicks: ${esc(ENGINE.finisher.how)}</span></li><li><span>${esc(ENGINE.rule)}</span></li></ol>
+      <ol class="manual" style="border-top:1px solid var(--line)"><li><span>${esc(ENGINE.odd[L].name)}: ${esc(ENGINE.odd[L].how)}</span></li><li><span>Mountain climbers: ${esc(ENGINE.even.how)}</span></li><li><span>Flutter kicks: ${esc(ENGINE.finisher.how)}</span></li><li><span>${esc(ENGINE.rule)}</span></li></ol>
       <table class="lvltable" style="margin-top:18px">${lines}</table>${e ? '' : ''}`);
   }
   if (id === 'deck') {
     return wrap('Deck of Cards', `<p class="lead" style="margin-top:0">The old barracks drill. ${esc(DECK.rule)}</p>
-      <ul class="suitlist" style="border-top:2px solid var(--ink)">${DECK.suits.map((su) => `<li>${suitSvg(su.id, 'suit' + (su.red ? ' red' : ''))}<span>${esc(su.name)}</span><span class="muted">${esc(su.move)}</span></li>`).join('')}</ul>
+      <ul class="suitlist" style="border-top:1px solid var(--line)">${DECK.suits.map((su) => `<li>${suitSvg(su.id, 'suit' + (su.red ? ' red' : ''))}<span>${esc(su.name)}</span><span class="muted">${esc(su.move)}</span></li>`).join('')}</ul>
       <ol class="manual"><li><span>${esc(DECK.values)}</span></li>${DECK.byLevel.map((x) => `<li><span>${esc(x)}</span></li>`).join('')}</ol>`);
   }
   if (id === 'test') {
-    return wrap('The PT test', `<p class="lead" style="margin-top:0">${esc(TEST.when)}</p><ol class="manual" style="border-top:2px solid var(--ink)">${TEST.events.map((ev) => `<li><span><b>${esc(ev.name)}.</b> ${esc(ev.how)}</span></li>`).join('')}</ol>
+    return wrap('The PT test', `<p class="lead" style="margin-top:0">${esc(TEST.when)}</p><ol class="manual" style="border-top:1px solid var(--line)">${TEST.events.map((ev) => `<li><span><b>${esc(ev.name)}.</b> ${esc(ev.how)}</span></li>`).join('')}</ol>
       <div class="btnrow" style="margin-top:18px"><button type="button" class="btn" data-act="start-test" data-slot="${D().test.w1 ? 'w8' : 'w1'}">${D().test.w1 ? 'Take the week 8 retest' : 'Take the week 1 test'}</button></div>`);
   }
   if (id === 'kit') {
@@ -591,7 +652,7 @@ function settingsView() {
   const today = dateKey(), w = s.start ? weekNumber(s.start, today) : 1;
   const weekTxt = s.start ? (w < 1 ? `Week 1 begins ${longDate(mondayOf(s.start))}.` : w > WEEKS ? `All ${WEEKS} weeks are done (started ${dayMonth(mondayOf(s.start))}).` : `Week 1 began ${longDate(mondayOf(s.start))}. Today is in week ${w}.`) : '';
   return `${navbar('Settings', { back: 'More' })}${largeTitle('Settings')}
-    <div class="section" style="margin-top:0">${secH('Program')}
+    <div class="section" style="margin-top:14px">${secH('Program')}
       <div class="field"><div class="lab">Schedule</div>${seg('schedule', Object.entries(SCHEDULES).map(([k, v]) => ({ v: k, l: v.label })), s.schedule, 'set-schedule')}<p class="help">${esc(SCHEDULES[s.schedule].note)}</p></div>
       <div class="field"><div class="lab">Level</div>${seg('level', LEVELS.map((l) => ({ v: l.id, l: l.name })), s.level, 'set-level')}<p class="help">${esc(LEVELS[s.level].example)}.${Object.keys(s.moveLevel).length ? ` ${Object.keys(s.moveLevel).length} move${Object.keys(s.moveLevel).length > 1 ? 's are' : ' is'} set to its own level. <button type="button" class="linkbtn" style="padding:0;min-height:0" data-act="clear-movelevels">Reset them</button>` : ''}</p></div>
       <div class="field"><div class="lab">Focus</div>${seg('focus', Object.entries(FOCUS).map(([k, v]) => ({ v: k, l: v.label })), s.focus, 'set-focus')}<p class="help">${esc(FOCUS[s.focus].text)}${s.focus === 'arms' ? ' ' + esc(ARMS_LINE) : ''}</p></div>
@@ -601,8 +662,9 @@ function settingsView() {
         <button type="button" class="btn quiet wide" style="margin-top:12px" data-act="calendar">Add a reminder to Calendar</button></div>
     </div>
     <div class="section">${secH('Workout')}
-      <div class="field"><div class="lab">Rest after main moves<small>Squats, rows, push-ups</small></div>${seg('restLong', [60, 75, 90, 120].map((v) => ({ v, l: `${v} s` })), s.restLong, 'set-rest')}</div>
-      <div class="field"><div class="lab">Rest after small moves</div>${seg('restShort', [45, 60, 75, 90].map((v) => ({ v, l: `${v} s` })), s.restShort, 'set-rest')}</div>
+      <div class="field"><div class="lab">Rest after superset 1<small>The leg pair</small></div>${seg('restLong', [60, 75, 90].map((v) => ({ v, l: `${v} s` })), s.restLong, 'set-rest')}</div>
+      <div class="field"><div class="lab">Rest after supersets 2 and 3</div>${seg('restShort', [45, 60].map((v) => ({ v, l: `${v} s` })), s.restShort, 'set-rest')}
+        <p class="help">The rest comes after each round, once you’ve done both moves. These choices keep every session under 40 minutes.</p></div>
       ${sw('sound', 'Sound', 'Beeps when rest ends and each minute starts', s.sound)}
       ${sw('vibrate', 'Vibration', 'Buzzes and taps where the phone allows it', s.vibrate)}
     </div>
@@ -628,7 +690,7 @@ function settingsView() {
 const S2 = (patch, msg) => { store.saveSettings(patch); refresh(); if (msg) toast(msg); };
 on('set-schedule', (v) => S2({ schedule: v }, `${SCHEDULES[v].label} a week`));
 on('set-level', (v) => S2({ level: +v }, `${LEVELS[+v].name} level`));
-on('set-focus', (v) => S2({ focus: v }, v === 'arms' ? 'Arm finisher on' : 'Balanced plan'));
+on('set-focus', (v) => S2({ focus: v }, v === 'arms' ? 'Arm work in the supersets' : 'Balanced plan'));
 on('clear-movelevels', () => S2({ moveLevel: {} }, 'Every move follows your level again'));
 on('set-start', (v, el) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { el.value = S().start; return; }
@@ -695,5 +757,6 @@ export const VIEWS = {
   entry: { render: entryView },
   more: { render: moreView },
   guide: { render: guideView },
+  library: { render: libraryView, mounted: (v) => filterLibrary(v.el) },
   settings: { render: settingsView },
 };

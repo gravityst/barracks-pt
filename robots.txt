@@ -1,0 +1,4 @@
+# A personal training app, not a public site: keep it out of search results.
+# (Crawlers only read robots.txt at a domain's root, so the noindex tag in index.html does the real work here.)
+User-agent: *
+Disallow: /

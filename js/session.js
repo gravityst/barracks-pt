@@ -1,12 +1,13 @@
-// Workout mode: the full-screen guided sessions. Strength (sets, reps, auto rest), Echo (EMOM clock),
+// Workout mode: the full-screen guided sessions. Strength (three supersets: 1a, 1b, rest, repeat), Echo (EMOM clock),
 // Foxtrot (deck of cards), Mobility (walk + timed stretches), Walk, and the PT test.
 // The running session is saved after every step, so a closed or killed app picks up where it was.
-import { WARMUP, COOLDOWN, ENGINE, DECK, MOBILITY, WALK, TEST, LEVELS, GRIP_TIP } from './data.js';
+import { WARMUP, COOLDOWN, ENGINE, DECK, MOBILITY, WALK, TEST, LEVELS, GRIP_TIP, REST_NOTE } from './data.js';
 import { dateKey, clock, minutesLabel, shuffleDeck, repsForCard, readyToLevelUp, levelName, entryForSlot } from './plan.js';
 import * as store from './store.js';
 import { esc, icon, tick, suitSvg, kitText, longDate, on, toast, openSheet, closeSheet, confirmSheet, pad2 } from './ui.js';
 import { beep, unlockAudio, keepAwake, tap } from './feedback.js';
 import { refresh } from './nav.js';
+import { demoSlot, mountDemos, doLine, openMoveSheet, refSlot, drillPicker } from './howto.js';
 
 const host = () => document.getElementById('session');
 let A = null;          // the running session (same object that's persisted)
@@ -44,10 +45,10 @@ export async function startSession(plan, slot) {
     level: s.level, startedAt: Date.now(), step: 0,
   };
   if (plan.kind === 'strength') {
-    A.moves = plan.moves; A.rir = plan.phase.rir; A.phase = plan.phase.name;
-    A.finisher = plan.finisher || null;
-    A.steps = ['warm', ...plan.moves.map((_, i) => 'm' + i), 'cool', 'sum'];
-    A.logs = {}; A.draft = {}; A.editing = null; A.rest = null; A.hold = null; A.warm = T.down(WARMUP.minutes * 60);
+    A.v = 2; A.blocks = plan.blocks; A.gap = plan.gap || null; A.moves = plan.moves;
+    A.rir = plan.phase.rir; A.phase = plan.phase.name; A.minutes = plan.minutes;
+    A.steps = ['warm', ...plan.blocks.map((_, i) => 'b' + i), 'cool', 'sum'];
+    A.logs = {}; A.draft = {}; A.focus = null; A.editing = null; A.rest = null; A.hold = null; A.warm = T.down(WARMUP.minutes * 60);
   } else if (plan.kind === 'engine') {
     A.cfg = plan.engine; A.steps = ['warm', 'emom', 'fin', 'sum']; A.emom = null; A.fin = null; A.result = null;
   } else if (plan.kind === 'deck') {
@@ -67,6 +68,13 @@ export async function startSession(plan, slot) {
 export function resumeSession() {
   A = store.active();
   if (!A) return;
+  // A workout started before the supersets: keep whatever it logged, then close it.
+  if (A.kind === 'strength' && !A.blocks) {
+    if (A.moves && A.logs) finish();
+    store.setActive(null); A = null; refresh();
+    toast('Your unfinished workout was saved to Progress.');
+    return;
+  }
   if (A.steps[A.step] === 'sum' && A.saved) { store.setActive(null); A = null; refresh(); return; }
   open(true);
 }
@@ -124,14 +132,49 @@ function render() {
   else if (A.kind === 'test') html = testScreen(k);
   el.innerHTML = `<div class="s-wrap">${html}</div>`;
   el.setAttribute('aria-label', `${A.name} session`);
+  mountDemos(el);
   live();
 }
 
-function listBlock(title, items) {
-  return `<div class="sets"><ul class="bulleted" style="margin-top:0">${items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
+// Warm-up, cool-down and stretch lists show one demo at a time; tap an item to see it.
+const picked = (list) => (A.pick && A.pick[list]) || 0;
+function drills(list, items, refs) {
+  return `<div class="sets">${drillPicker(list, items, refs, picked(list))}</div>`;
 }
+on('pick-drill', (d) => {
+  if (!A) return;
+  A.pick = { ...(A.pick || {}), [d.list]: +d.i };
+  tap(); save();
+  const body = host().querySelector('.s-body'), top = body ? body.scrollTop : 0;
+  render();
+  const b2 = host().querySelector('.s-body');
+  if (b2) b2.scrollTop = top;
+  host().querySelector(`[data-act="pick-drill"][data-list="${d.list}"][data-i="${d.i}"]`)?.focus({ preventScroll: true });
+});
+// The warm-up's last line is "5 light reps of each move in superset 1": that shows superset 1's 1a.
+function warmRefs() {
+  const first = A.blocks && A.blocks[0] && A.blocks[0].moves[0];
+  return WARMUP.demos.map((r, i) => r || (i === WARMUP.items.length - 1 && first ? `@${first.id}:${first.level}` : null));
+}
+const suitRef = (su, L) => (su.demo === 'push-up' ? `push-up:${L}` : su.demo);
 
-// ---------- strength ----------
+// ---------- strength: three supersets ----------
+// A superset is done in order 1a, 1b, rest, 1a, 1b, rest… One move is on screen at a time.
+// `A.focus` is a move the person tapped in the pair strip; otherwise the screen follows the order.
+const blockAt = () => A.blocks[+step().slice(1)];
+const tagOf = (b, j) => (b.kind === 'pair' ? `${b.n}${'ab'[j]}` : '');
+const setsOf = (m) => (A.logs[m.id] || []);
+function nextIn(b) {
+  for (let r = 0; r < b.rounds; r++) for (let j = 0; j < b.moves.length; j++) if (setsOf(b.moves[j]).length <= r) return { r, j };
+  return null;
+}
+function focusOf(b) {
+  if (A.focus != null && A.focus < b.moves.length) return A.focus;
+  const n = nextIn(b);
+  return n ? n.j : b.moves.length - 1;
+}
+const curMove = () => { const b = blockAt(); return b && b.moves[focusOf(b)]; };
+
 function lastValues(moveId, level) {
   const h = store.db().history;
   for (let i = h.length - 1; i >= 0; i--) {
@@ -141,7 +184,7 @@ function lastValues(moveId, level) {
   return null;
 }
 function defaultValue(m, setIdx) {
-  const logs = A.logs[m.id] || [];
+  const logs = setsOf(m);
   const last = lastValues(m.id, m.level);
   if (last && last[setIdx] != null) return last[setIdx];
   if (setIdx > 0 && logs[setIdx - 1] != null) return logs[setIdx - 1];
@@ -150,51 +193,69 @@ function defaultValue(m, setIdx) {
   return m.dose.lo ?? 10;
 }
 const unitWord = (m, n) => (m.dose.unit === 'sec' ? 's' : n === 1 ? 'rep' : 'reps') + (m.dose.per ? ` / ${m.dose.per}` : '');
+const blockLine = (b) => b.moves.map((x, j) => `${tagOf(b, j) ? tagOf(b, j) + ' ' : ''}${x.name}`).join(' + ');
+
+// 1a → 1b → rest, with where you are in it.
+function pairStrip(b, j, n) {
+  const r = n ? n.r : b.rounds;
+  const cells = b.moves.map((x, k) => {
+    const done = setsOf(x).length > r || (!n);
+    return `<li class="${k === j ? 'now' : ''}${done ? ' done' : ''}"><button type="button" data-act="s-focus" data-j="${k}" aria-pressed="${k === j}" aria-label="${esc(tagOf(b, k))}: ${esc(x.name)}, ${setsOf(x).length} of ${b.rounds} sets done">
+      <span class="tg">${esc(tagOf(b, k))}${done ? tick : ''}</span><span class="nm">${esc(x.name)}</span></button></li>`;
+  }).join('');
+  return `<ol class="pair" aria-label="${esc(b.label)}">${cells}<li class="rs" aria-hidden="true"><span class="tg">Rest</span><span class="nm">${b.rest} s</span></li></ol>`;
+}
 
 function strengthScreen(k) {
   const s = store.settings();
   if (k === 'warm') {
+    const pairs = A.blocks.filter((b) => b.kind === 'pair').length;
+    const core = A.blocks.find((b) => b.kind === 'core');
     return `${topBar()}${progressBar()}<div class="s-body">
       <p class="s-step"><span>Warm-up</span><span>${WARMUP.minutes} min</span></p>
       <h1 class="s-name" tabindex="-1">Get warm</h1>
-      <p class="s-how">${esc(A.name)} · ${esc(A.title)}. ${A.moves.filter((m) => !m.finisher).length} moves${A.finisher ? `, then the arm finisher (${esc(A.finisher.focus.toLowerCase())})` : ''}.</p>
-      ${listBlock('Warm-up', WARMUP.items)}
-      <div class="bigclock mid${T.left(A.warm) <= 0 ? ' go' : ''}" data-live="warm" role="timer" style="margin-top:22px">${clock(Math.ceil(Math.max(0, T.left(A.warm))))}</div>
-      </div><div class="s-foot"><button type="button" class="btn primary big" data-act="s-next">Start move 1${icon.arrow}</button></div>`;
+      <p class="s-how">${esc(A.name)} · ${esc(A.title)}. ${pairs} supersets${core ? ', then a short core finish' : ''}. About ${A.minutes} minutes in all.</p>
+      ${drills('warm', WARMUP.items, warmRefs())}
+      <p class="fine" style="margin-top:14px">${esc(REST_NOTE)}</p>
+      <div class="bigclock mid${T.left(A.warm) <= 0 ? ' go' : ''}" data-live="warm" role="timer" style="margin-top:18px">${clock(Math.ceil(Math.max(0, T.left(A.warm))))}</div>
+      </div><div class="s-foot"><button type="button" class="btn primary big" data-act="s-next">Start superset 1${icon.arrow}</button></div>`;
   }
   if (k === 'cool') {
     return `${topBar()}${progressBar()}<div class="s-body">
       <p class="s-step"><span>Cool-down</span><span>${COOLDOWN.minutes} min</span></p>
       <h1 class="s-name" tabindex="-1">Cool down</h1>
-      ${listBlock('Cool-down', COOLDOWN.items)}
+      ${drills('cool', COOLDOWN.items, COOLDOWN.demos)}
       </div><div class="s-foot"><button type="button" class="btn primary big" data-act="s-finish">Finish ${esc(A.name)}${icon.arrow}</button></div>`;
   }
-  const i = +k.slice(1), m = A.moves[i];
-  const logs = A.logs[m.id] || [];
-  const complete = logs.length >= m.sets && A.editing == null;
-  const cur = A.editing ?? Math.min(logs.length, m.sets - 1);
+  const bi = +k.slice(1), b = A.blocks[bi];
+  const n = nextIn(b);
+  const j = focusOf(b), m = b.moves[j];
+  const logs = setsOf(m);
+  const moveDone = logs.length >= b.rounds && A.editing == null;
+  const cur = A.editing ?? Math.min(logs.length, b.rounds - 1);
   const last = lastValues(m.id, m.level);
   const val = A.draft[m.id] ?? (A.editing != null ? logs[A.editing] : defaultValue(m, cur));
-  const total = A.moves.length;
-  const finisherStart = A.moves.findIndex((x) => x.finisher);
-  // One count, in one place: the main moves, then the finisher's own count. The header button
-  // just opens the move list, so it carries no second number to disagree with this one.
-  const label = m.finisher ? `Arm finisher · ${i - finisherStart + 1} of ${total - finisherStart}`
-    : finisherStart > 0 ? `Move ${i + 1} of ${finisherStart}, then arm finisher` : `Move ${i + 1} of ${total}`;
-  const rows = Array.from({ length: m.sets }, (_, j) => {
-    const v = logs[j];
-    const isCur = !complete && j === cur;
-    const lastTxt = last && last[j] != null ? `Last ${last[j]}` : '';
+  const nb = A.blocks[bi + 1];
+  const pairs = A.blocks.filter((x) => x.kind === 'pair').length;
+  const where = b.kind === 'pair' ? `Superset ${b.n} of ${pairs}` : 'Core to finish';
+  const round = n ? n.r + 1 : b.rounds;
+  const rows = Array.from({ length: b.rounds }, (_, r) => {
+    const v = logs[r];
+    const isCur = !moveDone && r === cur;
+    const lastTxt = last && last[r] != null ? `Last ${last[r]}` : '';
     if (v != null && !isCur) {
-      return `<button type="button" class="set logged" data-act="s-edit" data-i="${j}" aria-label="Set ${j + 1}: ${v} ${unitWord(m, v)}. Tap to change."><span class="n">Set ${j + 1}</span><span class="val">${v} <small>${esc(unitWord(m, v))}</small></span><span class="last">${tick}</span></button>`;
+      return `<button type="button" class="set logged" data-act="s-edit" data-i="${r}" aria-label="Set ${r + 1}: ${v} ${unitWord(m, v)}. Tap to change."><span class="n">Set ${r + 1}</span><span class="val">${v} <small>${esc(unitWord(m, v))}</small></span><span class="last">${tick}</span></button>`;
     }
-    return `<div class="set${isCur ? ' cur' : ''}"><span class="n">Set ${j + 1}</span><span class="val">${isCur ? (A.editing != null ? 'Changing' : 'Now') : '<small>To do</small>'}</span><span class="last">${esc(lastTxt)}</span></div>`;
+    return `<div class="set${isCur ? ' cur' : ''}"><span class="n">Set ${r + 1}</span><span class="val">${isCur ? (A.editing != null ? 'Changing' : 'Now') : '<small>To do</small>'}</span><span class="last">${esc(lastTxt)}</span></div>`;
   }).join('');
   const holding = A.hold && m.dose.unit === 'sec';
   const kit = [m.dose.weight ? kitText(m.dose.weight, s.units) : '', `leave ${A.rir} in the tank`].filter(Boolean).join(' · ');
   let foot;
-  if (complete) {
-    foot = `<button type="button" class="btn primary big" data-act="s-next">${i + 1 < total ? `Next: ${esc(A.moves[i + 1].name)}` : 'Cool down'}${icon.arrow}</button>`;
+  if (!n && A.editing == null) {
+    foot = `<button type="button" class="btn primary big" data-act="s-next">${nb ? `Next: ${esc(nb.label)}` : 'Cool down'}${icon.arrow}</button>`;
+  } else if (moveDone) {
+    const o = b.moves[n.j];
+    foot = `<button type="button" class="btn primary big" data-act="s-focus" data-j="${n.j}">Go to ${esc(tagOf(b, n.j))} ${esc(o.name)}${icon.arrow}</button>`;
   } else {
     foot = `${m.dose.unit === 'sec' ? `<button type="button" class="btn wide${holding ? ' primary' : ''}" style="margin-bottom:10px" data-act="s-hold">${holding ? 'Stop the clock' : 'Time this hold'}</button>` : ''}
       <div class="stepper" role="group" aria-label="${m.dose.unit === 'sec' ? 'Seconds held' : 'Reps done'}">
@@ -203,37 +264,55 @@ function strengthScreen(k) {
           <input id="s-val" type="number" inputmode="numeric" min="0" max="999" value="${holding ? Math.floor(T.el(A.hold)) : val}" data-change="s-val" data-live="${holding ? 'hold' : ''}">
           <span class="unit">${esc(unitWord(m, val))}</span></div>
         <button type="button" data-act="s-step" data-d="1" aria-label="More">${icon.plus}</button></div>
-      <button type="button" class="btn primary big" style="margin-top:10px" data-act="s-log" ${holding ? 'disabled' : ''}>${A.editing != null ? `Save set ${cur + 1}` : `Log set ${cur + 1}`}${icon.arrow}</button>`;
+      <button type="button" class="btn primary big" style="margin-top:10px" data-act="s-log" ${holding ? 'disabled' : ''}>${A.editing != null ? `Save set ${cur + 1}` : nextLabel(b, j, cur, !!nb)}${icon.arrow}</button>`;
   }
   const rest = A.rest ? restPanel() : '';
   return `${topBar(`<button type="button" class="navbtn" data-act="s-moves">All moves</button>`)}${progressBar()}
     <div class="s-body">
-      <p class="s-step"><span>${esc(label)}</span><span>Rest ${m.rest} s</span></p>
-      <h1 class="s-name" tabindex="-1">${esc(m.name)}</h1>
-      <p class="s-dose"><b>${m.sets} × ${esc(m.dose.reps)}</b></p>
+      <p class="s-step"><span>${esc(where)}</span><span>Round ${round} of ${b.rounds}</span></p>
+      ${b.moves.length > 1 ? pairStrip(b, j, n) : ''}
+      ${demoSlot(m.id, m.level)}
+      <h1 class="s-name" tabindex="-1">${tagOf(b, j) ? `<span class="s-tag">${esc(tagOf(b, j))}</span>` : ''}${esc(m.name)}</h1>
+      <p class="s-dose"><b>${b.rounds} × ${esc(m.dose.reps)}</b></p>
       <p class="s-kit">${esc(kit.charAt(0).toUpperCase() + kit.slice(1))}</p>
-      <p class="s-how">${esc(m.how)}</p>
-      ${m.grip ? `<p class="callout" style="margin-top:12px">${esc(GRIP_TIP)}</p>` : ''}
       <div class="sets">${rows}</div>
-      <div class="subnav"><button type="button" class="linkbtn" data-act="s-prev" ${i === 0 ? 'disabled style="visibility:hidden"' : ''}>${icon.back.replace('<svg', '<svg width="14" height="14" style="vertical-align:-2px;stroke:currentColor;fill:none;stroke-width:2.4"')} Previous move</button>
-        <button type="button" class="linkbtn" data-act="s-skip">${i + 1 < total ? 'Skip this move' : 'Skip to cool-down'}</button></div>
+      <p class="s-how">${esc(doLine(m.id, m.level, m.how))}</p>
+      <button type="button" class="linkbtn s-howbtn" data-act="s-howto">How to do it</button>
+      ${m.grip ? `<p class="callout" style="margin-top:12px">${esc(GRIP_TIP)}</p>` : ''}
+      <div class="subnav"><button type="button" class="linkbtn" data-act="s-prev" ${bi === 0 ? 'disabled style="visibility:hidden"' : ''}>${icon.back.replace('<svg', '<svg width="14" height="14" style="vertical-align:-2px;stroke:currentColor;fill:none;stroke-width:2.4"')} Back</button>
+        <button type="button" class="linkbtn" data-act="s-skip">${nb ? `Skip to ${esc(nb.label.toLowerCase())}` : 'Skip to cool-down'}</button></div>
     </div>
     <div class="s-foot">${foot}</div>${rest}`;
 }
 
+// What logging this set leads to: the other half of the superset, or the rest.
+function nextLabel(b, j, cur, more) {
+  const after = b.moves.map((x, k) => setsOf(x).length + (k === j ? 1 : 0));
+  const head = `Log set ${cur + 1}`;
+  if (!after.every((c) => c === after[0])) {
+    const o = b.moves.findIndex((x, k) => k !== j && setsOf(x).length < after[j]);
+    if (o >= 0) return `${head}, then ${esc(tagOf(b, o))}`;
+  }
+  return after[0] >= b.rounds && !more ? 'Log the last set' : `${head}, then rest`;
+}
+
 function restPanel() {
   const r = A.rest;
+  const g = A.gap, gn = g ? setsOf(g).length : 0;
+  const gapHere = g && r.b === g.block && gn < g.sets;
   return `<section class="restpanel" aria-label="Rest timer" role="timer">
     <div class="r-top"><b>Rest</b><span>${esc(r.next)}</span></div>
     <div class="r-clock" data-live="rest">${clock(Math.ceil(T.left(r.t)))}</div>
     <div class="r-bar"><i data-live="restbar" style="transform:scaleX(${Math.max(0, T.left(r.t) / r.t.total).toFixed(3)})"></i></div>
     <p class="r-next">${r.hint}</p>
+    ${gapHere ? `<div class="r-gap"><p>In this rest: <b>${esc(g.name)}</b>, ${esc(g.dose.reps)}. Set ${gn + 1} of ${g.sets}.</p>
+      <button type="button" class="btn" data-act="s-gap">Did ${defaultValue(g, gn)}</button></div>` : ''}
     <div class="btnrow"><button type="button" class="btn" data-act="s-rest-add">+15 s</button><button type="button" class="btn primary" data-act="s-rest-skip">Skip rest</button></div>
   </section>`;
 }
 
-function startRest(seconds, next, hint) {
-  A.rest = { t: T.down(seconds), next, hint };
+function startRest(seconds, next, hint, b) {
+  A.rest = { t: T.down(seconds), next, hint, b };
 }
 function endRest(cue) {
   if (!A.rest) return;
@@ -244,17 +323,19 @@ function endRest(cue) {
   if (panel && !matchMedia('(prefers-reduced-motion: reduce)').matches) { panel.classList.add('out'); setTimeout(render, 260); }
   else render();
 }
+const clearMove = () => { A.editing = null; A.hold = null; A.focus = null; };
 
 on('s-next', () => {
   tap(); unlockAudio();
-  if (A.kind === 'strength') { A.editing = null; A.hold = null; A.rest = null; }
+  if (A.kind === 'strength') { clearMove(); A.rest = null; }
   go(A.step + 1);
 });
-on('s-prev', () => { A.editing = null; A.hold = null; A.rest = null; go(A.step - 1); });
-on('s-skip', () => { A.editing = null; A.hold = null; A.rest = null; go(A.step + 1); });
+on('s-prev', () => { clearMove(); A.rest = null; go(A.step - 1); });
+on('s-skip', () => { clearMove(); A.rest = null; go(A.step + 1); });
 on('s-finish', () => go(A.steps.indexOf('sum')));
+on('s-focus', (d) => { tap(); A.focus = +d.j; A.editing = null; A.hold = null; save(); render(); host().querySelector('.s-body')?.scrollTo(0, 0); });
 on('s-step', (d) => {
-  const m = A.moves[+step().slice(1)];
+  const m = curMove();
   const input = host().querySelector('#s-val');
   const inc = m.dose.unit === 'sec' ? 5 : 1;
   const v = Math.max(0, Math.min(999, (parseInt(input.value, 10) || 0) + inc * +d.d));
@@ -262,12 +343,11 @@ on('s-step', (d) => {
   host().querySelector('.stepper .unit').textContent = unitWord(m, v);
 });
 on('s-val', (v) => {
-  const m = A.moves[+step().slice(1)];
-  const n = Math.max(0, Math.min(999, parseInt(v, 10) || 0));
-  A.draft[m.id] = n;
+  const m = curMove();
+  A.draft[m.id] = Math.max(0, Math.min(999, parseInt(v, 10) || 0));
 });
 on('s-log', () => {
-  const i = +step().slice(1), m = A.moves[i];
+  const bi = +step().slice(1), b = A.blocks[bi], j = focusOf(b), m = b.moves[j];
   const input = host().querySelector('#s-val');
   const v = Math.max(0, Math.min(999, parseInt(input.value, 10) || 0));
   const logs = (A.logs[m.id] = A.logs[m.id] || []);
@@ -276,24 +356,40 @@ on('s-log', () => {
     logs[A.editing] = v; A.editing = null; delete A.draft[m.id];
     save(); render(); toast('Set updated'); return;
   }
+  if (logs.length >= b.rounds) return;
   logs.push(v);
   delete A.draft[m.id];
-  if (logs.length < m.sets) {
-    startRest(m.rest, `Next: set ${logs.length + 1} of ${m.sets}`, `${esc(m.name)} · <b>${esc(m.dose.reps)}</b>`);
-    save(); render();
-  } else {
-    const nm = A.moves[i + 1];
-    if (nm) { startRest(m.rest, `Next: ${nm.name}`, `Set 1 of ${nm.sets} · <b>${esc(nm.dose.reps)}</b>${nm.finisher && !m.finisher ? ' · Arm finisher' : ''}`); go(A.step + 1); }
+  A.focus = null; A.hold = null;
+  const counts = b.moves.map(setsOf).map((x) => x.length);
+  const n = nextIn(b);
+  const nb = A.blocks[bi + 1];
+  if (!n) {
+    if (nb) { startRest(b.rest, `Next: ${nb.label}`, esc(blockLine(nb)), bi); go(A.step + 1); }
     else go(A.step + 1);
+    return;
   }
+  if (counts.every((c) => c === counts[0])) {
+    const f = b.moves[0];
+    startRest(b.rest, `Next: round ${n.r + 1} of ${b.rounds}`, `${tagOf(b, 0) ? esc(tagOf(b, 0)) + ' ' : ''}${esc(f.name)} · <b>${esc(f.dose.reps)}</b>`, bi);
+  } else {
+    toast(`Now ${tagOf(b, n.j)}: ${b.moves[n.j].name}`);
+  }
+  save(); render(); host().querySelector('.s-body')?.scrollTo(0, 0);
+});
+on('s-gap', () => {
+  const g = A.gap;
+  if (!g) return;
+  const logs = (A.logs[g.id] = A.logs[g.id] || []);
+  if (logs.length < g.sets) logs.push(defaultValue(g, logs.length));
+  tap(); save(); render();
 });
 on('s-edit', (d) => {
   if (A.rest) return;
-  const m = A.moves[+step().slice(1)];
+  const m = curMove();
   A.editing = +d.i; delete A.draft[m.id]; save(); render();
 });
 on('s-hold', () => {
-  const m = A.moves[+step().slice(1)];
+  const m = curMove();
   tap(); unlockAudio();
   if (A.hold) {
     A.draft[m.id] = Math.floor(T.el(A.hold)); A.hold = null;
@@ -302,20 +398,29 @@ on('s-hold', () => {
 });
 on('s-rest-add', () => { if (A.rest) { A.rest.t.total += 15; tap(); save(); live(); } });
 on('s-rest-skip', () => { tap(); endRest(false); });
-// Numbered the way the move screen counts them: main moves 1–6, then the finisher's own 1–4.
-function moveRows(list, cur, attrs) {
-  return `<div class="rows" ${attrs}>${list.map((m, j) => {
-    const i = A.moves.indexOf(m), n = (A.logs[m.id] || []).length;
-    return `<button type="button" class="row" data-act="sheet" data-v="m${i}"><span><span class="t">${j + 1}. ${esc(m.name)}</span><span class="s">${n}/${m.sets} sets${cur === 'm' + i ? ' · now' : ''}</span></span><span class="v">${n >= m.sets ? tick : ''}</span></button>`;
-  }).join('')}</div>`;
-}
+on('s-howto', () => {
+  if (!A || !/^b\d+$/.test(step())) return;
+  const m = curMove();
+  openMoveSheet({ id: m.id, level: m.level, name: m.name, how: m.how });
+});
+// Every superset with its two moves, then the core; tap one to go to it.
 on('s-moves', async () => {
-  const cur = step();
+  const cur = step(), cb = /^b\d+$/.test(cur) ? blockAt() : null, cj = cb ? focusOf(cb) : -1;
+  const rows = A.blocks.map((b, bi) => `<div class="sec-h" style="margin-top:${bi ? 20 : 14}px"><h3>${esc(b.label)}</h3><span class="aside">${b.rounds} rounds · rest ${b.rest} s</span></div>
+    <div class="rows" style="border-top:0">${b.moves.map((m, j) => {
+      const nn = setsOf(m).length;
+      return `<button type="button" class="row" data-act="sheet" data-v="b${bi}:${j}"><span><span class="t">${tagOf(b, j) ? esc(tagOf(b, j)) + ' · ' : ''}${esc(m.name)}</span><span class="s">${nn}/${b.rounds} sets${cb === b && cj === j ? ' · now' : ''}</span></span><span class="v">${nn >= b.rounds ? tick : ''}</span></button>`;
+    }).join('')}</div>`).join('');
+  const g = A.gap;
+  const gapRow = g ? `<p class="fine" style="margin-top:14px">During the rests of superset ${g.block + 1}: ${esc(g.name)}, ${esc(g.dose.reps)} (${setsOf(g).length}/${g.sets} done).</p>` : '';
   const v = await openSheet(`<h2 id="sheet-title">${esc(A.name)}</h2><p class="sub">Jump to any move. Logged sets stay.</p>
-    ${moveRows(A.moves.filter((m) => !m.finisher), cur, 'style="margin-top:14px"')}
-    ${A.moves.some((m) => m.finisher) ? `<div class="sec-h" style="margin-top:22px"><h3>Arm finisher</h3></div>${moveRows(A.moves.filter((m) => m.finisher), cur, 'style="border-top:0"')}` : ''}
+    ${rows}${gapRow}
     <div class="stack"><button type="button" class="btn quiet wide" data-act="sheet" data-v="">Close</button></div>`);
-  if (v && v.startsWith('m')) { A.editing = null; A.hold = null; A.rest = null; go(A.steps.indexOf(v)); }
+  if (v && v.startsWith('b')) {
+    const [b, j] = v.slice(1).split(':').map(Number);
+    A.editing = null; A.hold = null; A.rest = null; A.focus = j;
+    go(A.steps.indexOf('b' + b));
+  }
 });
 
 // ---------- engine (EMOM) ----------
@@ -331,6 +436,8 @@ function minuteTask(n) { // n is 0-based; minute 1 is odd
   const c = A.cfg;
   return n % 2 === 0 ? { what: `${c.odd.reps} ${c.odd.name.toLowerCase()}`, how: c.odd.how } : { what: `${c.even.reps} mountain climbers`, how: c.even.how };
 }
+// Sessions saved before the demos existed have no `demo` on their odd-minute move.
+const oddDemo = (c) => c.odd.demo || (/thrust/i.test(c.odd.name) ? 'squat-thrust' : 'burpee');
 function engineScreen(k) {
   const c = A.cfg;
   if (k === 'warm') {
@@ -338,7 +445,7 @@ function engineScreen(k) {
       <p class="s-step"><span>Warm-up</span><span>${ENGINE.warmup.minutes} min</span></p>
       <h1 class="s-name" tabindex="-1">Get warm</h1>
       <p class="s-how">Echo · ${c.minutes} minutes, every minute on the minute. Odd minutes: ${c.odd.reps} ${esc(c.odd.name.toLowerCase())}. Even minutes: ${c.even.reps} mountain climbers. Then ${c.finisher.seconds} s of flutter kicks.</p>
-      ${listBlock('', ENGINE.warmup.items)}
+      ${drills('ewarm', ENGINE.warmup.items, ENGINE.warmup.demos)}
       <p class="fine">${esc(ENGINE.rule)}</p>
       </div><div class="s-foot"><button type="button" class="btn primary big" data-act="e-start">Start the clock${icon.arrow}</button></div>`;
   }
@@ -354,6 +461,7 @@ function engineScreen(k) {
       <div class="task"><h1 class="now" tabindex="-1" data-live="emom-now">${esc(st.lead ? `First: ${now.what}` : now.what)}</h1>
         <p class="how" data-live="emom-how">${esc(now.how)} Rest for whatever is left of the minute.</p>
         <p class="next" data-live="emom-next">${next ? `Next minute: <b>${esc(next.what)}</b>` : `Then: <b>${c.finisher.seconds} s flutter kicks</b>`}</p></div>
+      ${refSlot(n % 2 === 0 ? oddDemo(c) : ENGINE.even.demo, 'sm')}
       <ol class="minutes" aria-label="${st.lead ? 0 : n} of ${c.minutes} minutes done">${Array.from({ length: c.minutes }, (_, i) => `<li class="${!st.lead && i < n ? 'done' : !st.lead && i === n ? 'now' : ''}"></li>`).join('')}</ol>
       <div class="subnav" style="margin-top:12px"><span></span><button type="button" class="linkbtn" data-act="e-skip">Skip to the finisher</button></div>
       </div><div class="s-foot"><button type="button" class="btn big ${paused ? 'primary' : ''}" data-act="e-pause">${paused ? `Resume${icon.play}` : `Pause${icon.pause}`}</button></div>`;
@@ -365,6 +473,7 @@ function engineScreen(k) {
       <p class="s-step"><span>Finisher</span><span>${c.finisher.seconds} s</span></p>
       <h1 class="s-name" tabindex="-1">Flutter kicks</h1>
       <p class="s-how">${esc(c.finisher.how)}</p>
+      ${refSlot(ENGINE.finisher.demo, 'sm')}
       <div class="bigclock mid" data-live="fin" role="timer">${clock(left)}</div>
       </div><div class="s-foot">${t ? `<button type="button" class="btn big" data-act="e-fin-done">Done${icon.arrow}</button>` : `<button type="button" class="btn primary big" data-act="e-fin">Start ${c.finisher.seconds} s${icon.arrow}</button>`}</div>`;
   }
@@ -394,8 +503,9 @@ function deckScreen(k) {
       <p class="s-step"><span>Warm-up</span><span>${ENGINE.warmup.minutes} min</span></p>
       <h1 class="s-name" tabindex="-1">Get warm</h1>
       <p class="s-how">${esc(DECK.warmup)}</p>
-      ${listBlock('', ENGINE.warmup.items)}
-      <ul class="suitlist" style="margin-top:18px">${DECK.suits.map((su) => `<li>${suitSvg(su.id, 'suit' + (su.red ? ' red' : ''))}<span>${esc(su.name)}</span><span class="muted">${esc(su.move)}${su.id === 'C' && c.halfBurpees ? ' (half)' : ''}</span></li>`).join('')}${c.jokers ? '<li><span class="stencil">J</span><span>Jokers</span><span class="muted">1 min plank</span></li>' : ''}</ul>
+      ${drills('dwarm', ENGINE.warmup.items, ENGINE.warmup.demos)}
+      <ul class="suitlist taps" style="margin-top:18px">${DECK.suits.map((su) => `<li><button type="button" data-act="lib-sheet" data-ref="${esc(suitRef(su, L))}">${suitSvg(su.id, 'suit' + (su.red ? ' red' : ''))}<span>${esc(su.name)}</span><span class="muted">${esc(su.move)}${su.id === 'C' && c.halfBurpees ? ' (half)' : ''}</span></button></li>`).join('')}${c.jokers ? `<li><button type="button" data-act="lib-sheet" data-ref="${esc(DECK.joker)}"><span class="stencil">J</span><span>Jokers</span><span class="muted">1 min plank</span></button></li>` : ''}</ul>
+      <p class="fine" style="margin-top:6px">Tap a suit to see its move.</p>
       <p class="fine">${esc(DECK.values)} ${esc(c.text)}</p>
       </div><div class="s-foot"><button type="button" class="btn primary big" data-act="s-next">Shuffle up${icon.arrow}</button></div>`;
   }
@@ -418,6 +528,7 @@ function deckScreen(k) {
   return `${topBar(`<span class="clock" style="padding-right:12px">${d.i}/${total}</span>`)}${progressBar()}<div class="s-body">
     <div class="deck-stage"><button type="button" data-act="${last || (card && card.joker && !d.joker) ? '' : 'd-flip'}" style="background:none;border:0;padding:0" aria-label="${card ? 'Next card' : 'Flip the first card'}">${cardFace(card)}</button></div>
     <div class="deck-do" aria-live="polite">${doLine}</div>
+    ${card ? refSlot(card.joker ? DECK.joker : suitRef(DECK.suits.find((x) => x.id === card.suit), L), 'sm') : ''}
     <div class="deck-tally">${tally}</div>
     <p class="s-step" style="margin-top:12px"><span>Deck time <b data-live="deck">${d.clock ? clock(T.el(d.clock)) : '0:00'}</b></span><span>${esc(levelName(L))} · ${total} cards</span></p>
     ${!last && d.i > 0 ? '<div class="subnav"><span></span><button type="button" class="linkbtn" data-act="s-finish">Stop here and finish</button></div>' : ''}
@@ -454,6 +565,8 @@ function mobilityScreen(k) {
     <p class="s-step"><span data-live="st-state">${state}</span><span>Stretch ${A.si + 1} of ${list.length}</span></p>
     <h1 class="s-name" tabindex="-1">${esc(x.name)}</h1>
     ${x.side ? `<p class="s-dose"><span><b>${esc(x.side)}</b></span><span>${x.seconds} s</span></p>` : `<p class="s-dose"><span><b>${x.seconds} s</b></span></p>`}
+    ${refSlot(x.demo, 'sm')}
+    <p class="s-how"><button type="button" class="linkbtn s-howbtn" data-act="lib-sheet" data-ref="${esc(x.demo || '')}">How to do it</button></p>
     <div class="bigclock mid${A.stPhase === 'lead' ? ' go' : ''}" data-live="st" role="timer">${big}</div>
     <div class="task"><p class="next">${next ? `Next: <b>${esc(next.name)}${next.side ? `, ${esc(next.side.toLowerCase())}` : ''}</b>` : 'Last one.'}</p></div>
     <div class="subnav" style="margin-top:12px"><span></span><button type="button" class="linkbtn" data-act="m-skip">${next ? 'Skip this stretch' : 'Finish'}</button></div>
@@ -496,7 +609,7 @@ function testScreen(k) {
       <p class="s-step"><span>PT test · ${slotName}</span><span>3 events</span></p>
       <h1 class="s-name" tabindex="-1">PT test</h1>
       <p class="s-how">${esc(TEST.when)} Warm up first, and rest a few minutes between events.</p>
-      <ol class="manual" style="border-top:2px solid var(--ink);margin-top:18px">${TEST.events.map((ev) => `<li><span><b>${esc(ev.name)}.</b> ${esc(ev.how)}</span></li>`).join('')}</ol>
+      <ol class="manual" style="border-top:1px solid var(--line);margin-top:18px">${TEST.events.map((ev) => `<li><span><b>${esc(ev.name)}.</b> ${esc(ev.how)}</span></li>`).join('')}</ol>
       </div><div class="s-foot"><button type="button" class="btn primary big" data-act="s-next">Begin with push-ups${icon.arrow}</button></div>`;
   }
   const ev = TEST.events[+k.slice(1)];
@@ -521,6 +634,7 @@ function testScreen(k) {
     <p class="s-step"><span>Event ${+k.slice(1) + 1} of 3 · ${slotName}</span><span data-live="t-state">${A.evPhase === 'enter' ? 'Enter your score' : A.evLead ? 'Get ready' : A.evPhase === 'run' ? 'Go' : 'Ready'}</span></p>
     <h1 class="s-name" tabindex="-1">${esc(ev.name)}</h1>
     <p class="s-how">${esc(ev.how)}</p>
+    ${A.evPhase === 'enter' ? '' : refSlot(ev.demo, 'sm')}
     ${big !== '' ? `<div class="bigclock mid${A.evLead ? ' go' : ''}" data-live="t" role="timer">${big}</div>` : `<p class="lead" style="margin-top:22px">${ev.unit === 'sec' ? 'Seconds held, from the clock.' : 'How many good reps?'} Adjust it if you need to.</p>`}
     <div class="subnav" style="margin-top:16px"><span></span><button type="button" class="linkbtn" data-act="t-skip">Skip this event</button></div>
     </div><div class="s-foot">${foot}</div>`;
@@ -548,7 +662,8 @@ function finish() {
   if (A.saved) return;
   const e = { id: A.id, kind: A.kind, slot: A.slot, date: A.date, week: A.week, day: A.day, key: A.key, name: A.name, title: A.title, level: A.level, startedAt: A.startedAt, endedAt: Date.now() };
   if (A.kind === 'strength') {
-    e.moves = A.moves.filter((m) => (A.logs[m.id] || []).length).map((m) => ({ id: m.id, name: m.name, level: m.level, unit: m.dose.unit, per: m.dose.per, target: m.sets, sets: A.logs[m.id], finisher: !!m.finisher, hi: m.dose.hi }));
+    const tagFor = (m) => (m.gap ? 'Rest gap' : A.blocks ? (A.blocks[m.block]?.kind === 'core' ? 'Core' : `${m.block + 1}${m.slot}`) : m.finisher ? 'Finisher' : '');
+    e.moves = A.moves.filter((m) => (A.logs[m.id] || []).length).map((m) => ({ id: m.id, name: m.name, level: m.level, unit: m.dose.unit, per: m.dose.per, target: m.sets, sets: A.logs[m.id], tag: tagFor(m), hi: m.dose.hi }));
     if (!e.moves.length) { A.saved = true; A.nothing = true; return; }
   } else if (A.kind === 'engine') {
     const st = A.emom ? emomState() : { minute: 0 };
@@ -598,7 +713,8 @@ export function summaryHTML(e, { record = false } = {}) {
       // "Making it harder": top of the range on every set, two sessions running.
       const upto = hist.slice(0, hist.findIndex((x) => x.id === e.id) + 1);
       const ready = !record && m.level < 2 && m.hi && readyToLevelUp(upto, { id: m.id, level: m.level, dose: { hi: m.hi, amrap: false } });
-      return `<li><span class="nm">${esc(m.name)}${m.finisher ? ' <span class="tag">Finisher</span>' : ''}<span class="sets-done" style="display:block">${m.sets.map((v) => v + unit).join(' · ')}${m.per ? ` / ${m.per}` : ''}</span></span>${delta}
+      const tg = m.tag || (m.finisher ? 'Finisher' : '');
+      return `<li><span class="nm">${tg ? `<span class="tg">${esc(tg)}</span>` : ''}${esc(m.name)}<span class="sets-done" style="display:block">${m.sets.map((v) => v + unit).join(' · ')}${m.per ? ` / ${m.per}` : ''}</span></span>${delta}
         ${ready ? `<div class="lvlup"><span>Top of the range on every set, two sessions running. Move it up to ${esc(LEVELS[m.level + 1].name)}, or slow the lowering to 3–4 seconds.</span><button type="button" class="btn" data-act="s-levelup" data-id="${esc(m.id)}" data-l="${m.level + 1}">Move it up a level</button></div>` : ''}</li>`;
     }).join('')}</ol>${prev ? `<p class="fine">Change is against your last ${esc(e.name)} at this level (${esc(longDate(prev.date))}).</p>` : ''}`;
   } else if (e.engine) {
@@ -640,7 +756,7 @@ function summaryScreen() {
   const e = store.db().history.find((x) => x.id === A.id);
   if (!e) return '';
   return `<div class="s-top"><div></div><div class="clock">${esc(longDate(e.date))}</div><div></div></div>
-    <div class="s-body sum-head"><div class="stamp">${tick}<span>${A.kind === 'test' ? 'LOGGED' : 'DONE'}</span></div>
+    <div class="s-body sum-head"><div class="stamp">${tick}<span>${A.kind === 'test' ? 'Logged' : 'Done'}</span></div>
       <h1 class="s-name xl" tabindex="-1" style="margin-top:14px">${esc(e.name)}</h1><p class="s-how" style="margin-top:6px">${esc(e.title || '')}${e.week ? ` · Week ${e.week}` : ''}. Saved to Progress.</p>
       ${summaryHTML(e)}</div>
     <div class="s-foot"><button type="button" class="btn primary big" data-act="s-close">Done${icon.arrow}</button></div>`;
@@ -699,8 +815,8 @@ function live() {
       if (left <= 3.05 && left > 0.05) { const s = Math.ceil(left); if (A.rest.cue !== s) { A.rest.cue = s; if (fresh(A.rest.t, A.rest.t.total - left)) beep('tick'); } }
       if (left <= 0) endRest(true);
     }
-    if (A.hold) {
-      const m = A.moves[+k.slice(1)];
+    if (A.hold && /^b\d+$/.test(k)) {
+      const m = curMove();
       const e = Math.floor(T.el(A.hold));
       setLive('hold', String(e));
       if (m && m.dose.hi && e >= m.dose.hi && !A.holdCue) { A.holdCue = true; beep('go'); }

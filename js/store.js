@@ -7,11 +7,12 @@ export const DEFAULTS = {
   setup: false,
   schedule: '4-day',
   level: 1,
-  focus: 'arms',       // balanced | arms (adds the arm finisher)
+  focus: 'arms',       // balanced | arms (arm work inside the supersets)
   start: null,         // 'YYYY-MM-DD'; week 1 is the Mon–Sun week holding it
   trainAt: '11:20',    // daily training time, 24 h
-  restLong: 90,
-  restShort: 60,
+  restLong: 75,        // after each round of superset 1: 60 | 75 | 90
+  restShort: 60,       // after each round of supersets 2 and 3: 45 | 60
+  program: 2,          // 2 = supersets, every session 40 minutes or less
   sound: true,
   vibrate: true,
   units: 'lb',
@@ -32,7 +33,7 @@ function read() {
     if (!raw) return structuredClone(EMPTY);
     const v = JSON.parse(raw);
     return {
-      settings: { ...DEFAULTS, ...(v.settings || {}), hide: { ...DEFAULTS.hide, ...(v.settings?.hide || {}) }, moveLevel: { ...(v.settings?.moveLevel || {}) } },
+      settings: migrate({ ...DEFAULTS, ...(v.settings || {}), hide: { ...DEFAULTS.hide, ...(v.settings?.hide || {}) }, moveLevel: { ...(v.settings?.moveLevel || {}) } }, v.settings),
       history: Array.isArray(v.history) ? v.history : [],
       weighins: Array.isArray(v.weighins) ? v.weighins : [],
       test: { w1: v.test?.w1 ?? null, w8: v.test?.w8 ?? null, last: v.test?.last ?? null },
@@ -44,6 +45,18 @@ function read() {
     else storageOK = false;
     return structuredClone(EMPTY);
   }
+}
+
+// Program 2 (supersets) has shorter rests so no session runs past 40 minutes. The old default of
+// 90 s becomes 75 s, and anything longer than the new choices comes down to the longest one.
+export function migrate(s, stored) {
+  if ((stored?.program ?? 1) < 2) {
+    if (s.restLong === 90) s.restLong = 75;
+    s.program = 2;
+  }
+  if (![60, 75, 90].includes(s.restLong)) s.restLong = s.restLong > 90 ? 90 : 75;
+  if (![45, 60].includes(s.restShort)) s.restShort = s.restShort > 60 ? 60 : 45;
+  return s;
 }
 
 function write() {

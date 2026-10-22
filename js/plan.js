@@ -1,5 +1,5 @@
 // Schedule maths: which week it is, what today's session holds, streaks. Pure, testable in Node.
-import { SESSIONS, SCHEDULES, phaseFor, LEVELS, ENGINE, DECK, FINISHERS, ARMS_SWAPS } from './data.js';
+import { SESSIONS, SCHEDULES, phaseFor, LEVELS, ENGINE, DECK, CATALOG, WARMUP, COOLDOWN, MOBILITY, WALK } from './data.js';
 
 export const WEEKS = 8;
 
@@ -56,35 +56,87 @@ export function levelFor(settings, moveId) {
 }
 
 // Everything needed to run or preview one day.
+// A strength day is three supersets (pairs done back to back, then rest), plus a short core block
+// on Arms & shoulders. `moves` is the same moves flattened in the order they're done.
 export function buildSession(settings, week, day) {
   const key = sessionKeyFor(settings, day);
   const s = SESSIONS[key];
   const w = Math.min(Math.max(week, 1), WEEKS);
   const phase = phaseFor(w);
   const L = settings.level;
-  const base = { key, name: s.name, title: s.title, time: s.time, kind: s.kind, optional: !!s.optional, week, day, phase, level: L };
+  const base = { key, name: s.name, title: s.title, kind: s.kind, optional: !!s.optional, week, day, phase, level: L };
   if (s.kind === 'strength') {
-    const arms = settings.focus === 'arms' && FINISHERS[key];
-    const one = (m, i, finisher) => {
-      const lv = levelFor(settings, m.id);
-      const dose = parseDose(m.d[lv]);
-      const sets = !finisher && phase.mainSets && m.main ? phase.mainSets : phase.sets;
-      const name = (arms && ARMS_SWAPS[m.id]?.[lv]) || m.n[lv];
-      return { id: m.id, index: i, name, level: lv, dose, sets, main: !finisher && m.main, how: m.h,
-        finisher, grip: !!(finisher && m.grip && lv >= 1),
-        rest: !finisher && m.main ? settings.restLong : settings.restShort };
+    const plan = settings.focus === 'arms' ? s.arms : s.balanced;
+    const one = (id, block, slot, sets) => {
+      const lv = levelFor(settings, id);
+      const alt = plan.alt?.[id];
+      if (alt && lv >= alt.minLevel && (!alt.evenWeeks || w % 2 === 0)) id = alt.id;
+      const c = CATALOG[id];
+      const v = levelFor(settings, id);
+      return { id, name: c.n[v], level: v, dose: parseDose(c.d[v]), sets, how: c.h, mg: c.mg,
+        grip: !!(c.grip && v >= 1), block, slot };
     };
-    base.moves = s.moves.map((m, i) => one(m, i, false));
-    if (arms) {
-      base.finisher = { title: arms.title, focus: arms.focus, minutes: arms.minutes };
-      arms.moves.forEach((m) => base.moves.push(one(m, base.moves.length, true)));
+    base.blocks = plan.pairs.map((pair, i) => {
+      // Push adds a round to superset 1; Build and Push keep superset 3 (the arm pair) at 2.
+      const rounds = i === 0 && phase.first ? phase.first : i === 2 && phase.last ? phase.last : phase.rounds;
+      return { n: i + 1, label: `Superset ${i + 1}`, kind: 'pair', rounds, rest: i === 0 ? settings.restLong : settings.restShort,
+        moves: pair.map((id, j) => one(id, i, 'ab'[j], rounds)) };
+    });
+    if (plan.core) {
+      const i = base.blocks.length;
+      base.blocks.push({ n: i + 1, label: 'Core', kind: 'core', rounds: phase.core, rest: TIME.coreRest, moves: [one(plan.core, i, '', phase.core)] });
     }
+    // The calf raises go in the rests of superset 2, the upper-body pair.
+    if (plan.gap) base.gap = { ...one(plan.gap, 1, 'gap', base.blocks[1].rounds), gap: true };
+    base.moves = base.blocks.flatMap((b) => b.moves);
+    if (base.gap) base.moves.push(base.gap);
   } else if (s.kind === 'engine') {
     base.engine = engineFor(L);
   } else if (s.kind === 'deck') {
     base.deck = deckRulesFor(L);
   }
+  base.seconds = sessionSeconds(base);
+  base.minutes = Math.round(base.seconds / 60);
   return base;
+}
+
+// ---- how long a session takes ----
+// Honest, not flattering: about 45 s a set, 65 s when it's one side then the other, a hold is its
+// time plus 15 s to get into it (both sides of a side plank, plus one switch), 15 s to move between
+// the two halves of a superset, and the rest you chose after every round.
+export const TIME = { set: 45, sides: 65, holdPad: 15, swap: 15, coreRest: 30, card: 3, breather: 1.1,
+  rep: { S: 2, H: 2, D: 2.5, C: 4 } };
+
+export function setSeconds(dose) {
+  if (dose.unit === 'sec') { const t = dose.hi || dose.lo || 30; return (dose.per ? t * 2 : t) + TIME.holdPad; }
+  return dose.per ? TIME.sides : TIME.set;
+}
+
+export function blockSeconds(b, last) {
+  const round = b.moves.reduce((a, m) => a + setSeconds(m.dose), 0) + TIME.swap * (b.moves.length - 1);
+  return round * b.rounds + b.rest * (last ? b.rounds - 1 : b.rounds);
+}
+
+// A deck's time from the average card: number cards are their value, faces 10, aces 11.
+function deckSeconds(d) {
+  const perSuit = 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 10 + 10 + 10 + 11; // 95 reps a suit
+  const share = d.cards / 52;
+  let t = 0;
+  for (const su of DECK.suits) t += perSuit * share * TIME.rep[su.id] * (su.id === 'C' && d.halfBurpees ? 0.5 : 1);
+  t = (t + d.cards * TIME.card) * TIME.breather;
+  return t + (d.jokers ? 120 : 0);
+}
+
+export function sessionSeconds(p) {
+  if (p.kind === 'strength') {
+    const work = p.blocks.reduce((a, b, i) => a + blockSeconds(b, i === p.blocks.length - 1), 0);
+    return WARMUP.minutes * 60 + work + COOLDOWN.minutes * 60;
+  }
+  if (p.kind === 'engine') return (ENGINE.warmup.minutes + p.engine.minutes + 2) * 60 + p.engine.finisher.seconds;
+  if (p.kind === 'deck') return (ENGINE.warmup.minutes + 2) * 60 + deckSeconds(p.deck);
+  if (p.kind === 'mobility') return MOBILITY.walk.minutes * 60 + MOBILITY.stretches.reduce((a, x) => a + x.seconds, 0);
+  if (p.kind === 'walk') return WALK.minutes * 60;
+  return 0;
 }
 
 export function engineFor(L) {
@@ -96,8 +148,10 @@ export function engineFor(L) {
   };
 }
 
+// Recruit: half a deck, burpees count half. Regular: three-quarters. Ranger: the full deck and both jokers.
+export const DECK_CARDS = [26, 39, 52];
 export function deckRulesFor(L) {
-  return { cards: L === 0 ? 26 : L === 2 ? 54 : 52, jokers: L === 2, halfBurpees: L === 0, text: DECK.byLevel[L] };
+  return { cards: DECK_CARDS[L] + (L === 2 ? 2 : 0), jokers: L === 2, halfBurpees: L === 0, text: DECK.byLevel[L] };
 }
 
 export function cardValue(rank) {
@@ -112,7 +166,7 @@ export function shuffleDeck(L, rand = Math.random) {
   for (const su of DECK.suits) for (const r of DECK.ranks) deck.push({ suit: su.id, rank: r });
   if (L === 2) deck.push({ joker: true }, { joker: true });
   for (let i = deck.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [deck[i], deck[j]] = [deck[j], deck[i]]; }
-  return L === 0 ? deck.slice(0, 26) : deck;
+  return L === 2 ? deck : deck.slice(0, DECK_CARDS[L]);
 }
 export function repsForCard(card, L) {
   if (card.joker) return { plank: 60 };
